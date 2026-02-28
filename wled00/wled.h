@@ -7,7 +7,7 @@
  */
 
 // version code in format yymmddb (b = daily build)
-#define VERSION 2602141
+#define VERSION 260228
 
 //uncomment this if you have a "my_config.h" file you'd like to use
 //#define WLED_USE_MY_CONFIG
@@ -29,9 +29,9 @@
 #endif
 
 // You can choose some of these features to disable:
-//#define WLED_DISABLE_ALEXA       // saves 11kb
-//#define WLED_DISABLE_HUESYNC     // saves 4kb
-//#define WLED_DISABLE_INFRARED    // saves 12kb, there is no pin left for this on ESP8266-01
+#define WLED_DISABLE_ALEXA       // saves 11kb
+#define WLED_DISABLE_HUESYNC     // saves 4kb
+#define WLED_DISABLE_INFRARED    // saves 12kb, there is no pin left for this on ESP8266-01
 #ifndef WLED_DISABLE_MQTT
   #define WLED_ENABLE_MQTT         // saves 12kb
 #endif
@@ -40,7 +40,7 @@
 #else
   #undef WLED_ENABLE_ADALIGHT      // disable has priority over enable
 #endif
-//#define WLED_ENABLE_DMX          // uses 3.5kb
+// #define WLED_ENABLE_DMX          // uses 3.5kb
 #ifndef WLED_DISABLE_LOXONE
   #define WLED_ENABLE_LOXONE       // uses 1.2kb
 #endif
@@ -50,7 +50,7 @@
   #define WLED_ENABLE_JSONLIVE     // peek LED output via /json/live (WS binary peek is always enabled)
 #endif
 
-//#define WLED_DISABLE_ESPNOW      // Removes dependence on esp now
+#define WLED_DISABLE_ESPNOW      // Removes dependence on esp now
 
 #define WLED_ENABLE_FS_EDITOR      // enable /edit page for editing FS content. Will also be disabled with OTA lock
 
