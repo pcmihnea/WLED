@@ -7,7 +7,7 @@
  */
 
 // version code in format yymmddb (b = daily build)
-#define VERSION 2606301
+#define VERSION 260228
 
 //uncomment this if you have a "my_config.h" file you'd like to use
 //#define WLED_USE_MY_CONFIG
@@ -29,9 +29,9 @@
 #endif
 
 // You can choose some of these features to disable:
-//#define WLED_DISABLE_ALEXA       // saves 11kb
-//#define WLED_DISABLE_HUESYNC     // saves 4kb
-//#define WLED_DISABLE_INFRARED    // saves 12kb, there is no pin left for this on ESP8266-01
+#define WLED_DISABLE_ALEXA       // saves 11kb
+#define WLED_DISABLE_HUESYNC     // saves 4kb
+#define WLED_DISABLE_INFRARED    // saves 12kb, there is no pin left for this on ESP8266-01
 #ifndef WLED_DISABLE_MQTT
   #define WLED_ENABLE_MQTT         // saves 12kb
 #endif
@@ -40,7 +40,7 @@
 #else
   #undef WLED_ENABLE_ADALIGHT      // disable has priority over enable
 #endif
-//#define WLED_ENABLE_DMX          // uses 3.5kb
+// #define WLED_ENABLE_DMX          // uses 3.5kb
 #ifndef WLED_DISABLE_LOXONE
   #define WLED_ENABLE_LOXONE       // uses 1.2kb
 #endif
@@ -50,7 +50,7 @@
   #define WLED_ENABLE_JSONLIVE     // peek LED output via /json/live (WS binary peek is always enabled)
 #endif
 
-//#define WLED_DISABLE_ESPNOW      // Removes dependence on esp now
+#define WLED_DISABLE_ESPNOW      // Removes dependence on esp now
 
 #define WLED_ENABLE_FS_EDITOR      // enable /edit page for editing FS content. Will also be disabled with OTA lock
 
@@ -469,14 +469,10 @@ WLED_GLOBAL bool arlsForceMaxBri _INIT(false);                    // enable to f
   WLED_GLOBAL uint16_t DMXStartLED _INIT(0);      // LED from which DMX fixtures start
 #endif
 #ifdef WLED_ENABLE_DMX_INPUT
-  WLED_GLOBAL int dmxInputTransmitPin _INIT(-1);
-  WLED_GLOBAL int dmxInputReceivePin _INIT(-1);
-  WLED_GLOBAL int dmxInputEnablePin _INIT(-1);
-  #if defined(ARDUINO_ARCH_ESP32) && (SOC_UART_NUM > 2)
+  WLED_GLOBAL int dmxInputTransmitPin _INIT(0);
+  WLED_GLOBAL int dmxInputReceivePin _INIT(0);
+  WLED_GLOBAL int dmxInputEnablePin _INIT(0);
   WLED_GLOBAL int dmxInputPort _INIT(2);
-  #else
-  WLED_GLOBAL int dmxInputPort _INIT(1);  // some MCUs only have two UART units
-  #endif
   WLED_GLOBAL DMXInput dmxInput;
 #endif
 
@@ -603,8 +599,7 @@ WLED_GLOBAL bool wasConnected _INIT(false);
 
 // color
 WLED_GLOBAL byte lastRandomIndex _INIT(0);        // used to save last random color so the new one is not the same
-WLED_GLOBAL std::vector<CRGBPalette16> customPalettes;  // custom palettes (file-based, IDs grow downwards starting at 200)
-WLED_GLOBAL std::vector<UsermodPalette> usermodPalettes; // usermod-registered palettes (IDs 255, 254, 253...)
+WLED_GLOBAL std::vector<CRGBPalette16> customPalettes;  // custom palettes
 WLED_GLOBAL uint8_t paletteBlend _INIT(0);        // determines blending and wrapping of palette: 0: blend, wrap if moving (SEGMENT.speed>0); 1: blend, always wrap; 2: blend, never wrap; 3: don't blend or wrap
 
 // transitions
@@ -780,7 +775,7 @@ typedef class Udp {
       RgbConnected = c3;
     }
 } __attribute__ ((aligned(1), packed)) udp_port_t;
-WLED_GLOBAL udp_port_t udp _INIT_N(({21324, 65506, 19446, 0, false, false, false}));
+WLED_GLOBAL udp_port_t udp _INIT_N(({21234, 65506, 19446, 0, false, false, false}));
 #define udpPort         udp.Port
 #define udpPort2        udp.Port2
 #define udpRgbPort      udp.RgbPort
