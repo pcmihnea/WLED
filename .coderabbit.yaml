@@ -87,7 +87,7 @@ reviews:
         requesting clarification over raising a false-positive finding.
 
         When initially reviewing a PR, summarize good practices 
-        and a create a prioritized list of suggested improvments.
+        and a create a prioritized list of suggested improvments. Limit both lists to show the "Top 5".
 
     - path: "wled00/data/**"
       instructions: >
@@ -113,7 +113,7 @@ reviews:
         originates.
 
         When initially reviewing a PR, summarize good practices 
-        and a create a prioritized list of suggested improvments.
+        and a create a prioritized list of suggested improvments. Limit both lists to "Top 5".
 
     - path: "wled00/html_*.h"
       instructions: >
@@ -162,7 +162,7 @@ reviews:
           - General memory-safety patterns unrelated to ingress-derived data flow
 
         When initially reviewing a PR, summarize good practices 
-        and a create a prioritized list of suggested improvments.
+        and a create a prioritized list of suggested improvments. Limit both lists to "Top 6".
 
     - path: ".github/workflows/*.{yml,yaml}"
       instructions: >
