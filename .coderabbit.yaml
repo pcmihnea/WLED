@@ -78,6 +78,9 @@ reviews:
         When it is unclear whether a value has been sanitized upstream, prefer
         requesting clarification over raising a false-positive finding.
 
+        When initially reviewing a PR, summarize good practices 
+        and a create a prioritized list of suggested improvments.
+
     - path: "wled00/data/**"
       instructions: >
         Follow the web UI conventions documented in docs/web.instructions.md.
