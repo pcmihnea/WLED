@@ -112,6 +112,9 @@ reviews:
         from fetched or config-derived data — regardless of where the data
         originates.
 
+        When initially reviewing a PR, summarize good practices 
+        and a create a prioritized list of suggested improvments.
+
     - path: "wled00/html_*.h"
       instructions: >
         These files are auto-generated from wled00/data/ by tools/cdata.js.
@@ -158,6 +161,9 @@ reviews:
           - Repeated range checks on values that have already been clamped
           - General memory-safety patterns unrelated to ingress-derived data flow
 
+        When initially reviewing a PR, summarize good practices 
+        and a create a prioritized list of suggested improvments.
+
     - path: ".github/workflows/*.{yml,yaml}"
       instructions: >
         Follow the CI/CD conventions documented in docs/cicd.instructions.md.
@@ -168,6 +174,9 @@ reviews:
         scoped to least privilege. Never interpolate github.event.* values directly
         into run: steps — pass them through an env: variable to prevent script
         injection. Do not use pull_request_target unless fully justified.
+
+        When initially reviewing a PR, summarize good practices 
+        and a create a prioritized list of suggested improvments.
 
     - path: "**/*.instructions.md"
       instructions: |
