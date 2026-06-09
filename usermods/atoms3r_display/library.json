@@ -1,0 +1,10 @@
+{
+  "name": "atoms3r_display",
+  "build": {
+    "flags": [ "-D USERMOD_ATOMS3R_DISPLAY" ],
+    "libArchive": false
+  },
+  "dependencies": {
+    "m5stack/M5GFX": "^0.2.22"
+  }
+}
