@@ -565,6 +565,90 @@ class ES8388Source : public I2SSource {
 
 };
 
+/* ES8311 Codec  (e.g. M5 Atomic Echo Base / AtomS3R-AI)
+   Mono audio codec configured over I2C, then streams its analog mic into I2S.
+   On the Echo Base there is NO MCLK pin, so the codec derives its clock from
+   BCLK/SCLK -- handled by es8311_init() with mclk_from_mclk_pin = false (which
+   also picks the right clock-divider coefficients for the SCLK ratio).
+   Vendored Wire-based driver: es8311.cpp / es8311.h / es8311_reg.h.
+*/
+#include "es8311.h"
+
+#ifndef ES8311_MIC_GAIN
+  #define ES8311_MIC_GAIN ES8311_MIC_GAIN_30DB   // ADC gain scale-up for the (quiet) MEMS mic
+#endif
+
+class ES8311Source : public I2SSource {
+  private:
+    es8311_handle_t _es = nullptr;
+    int _sr;
+
+    #ifdef ES8311_PI4IOE_ADDR
+    // Echo Base gates the codec / speaker-PA via a PI4IOE5V6408 I/O expander.
+    void _pi4ioeInit() {
+      auto w = [](uint8_t reg, uint8_t val){
+        Wire.beginTransmission((uint8_t)ES8311_PI4IOE_ADDR);
+        Wire.write(reg); Wire.write(val); Wire.endTransmission();
+      };
+      w(0x07, 0x00); // IO_PP: high-impedance
+      w(0x0D, 0xFF); // pull-ups enabled
+      w(0x03, 0x6F); // direction (P0 output, M5 default)
+      w(0x05, 0xFF); // outputs high (enable / un-mute)
+    }
+    #endif
+
+  public:
+    ES8311Source(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true) :
+      I2SSource(sampleRate, blockSize, sampleScale), _sr((int)sampleRate) {
+      _config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+    };
+
+    void initialize(int8_t i2swsPin, int8_t i2ssdPin, int8_t i2sckPin, int8_t mclkPin) {
+      DEBUGSR_PRINTLN(F("ES8311Source:: initialize();"));
+      if ((i2c_sda < 0) || (i2c_scl < 0)) {  // global I2C pins must be set (I2CSDAPIN/I2CSCLPIN)
+        DEBUGSR_PRINTF("\nAR: invalid ES8311 global I2C pins: SDA=%d, SCL=%d\n", i2c_sda, i2c_scl);
+        return;
+      }
+      es8311_set_twowire(&Wire);   // WLED already begins Wire on i2c_sda/i2c_scl
+
+      #ifdef ES8311_PI4IOE_ADDR
+      _pi4ioeInit();
+      #endif
+
+      _es = es8311_create((i2c_port_t)0, ES8311_ADDRRES_0);   // 0x18 (CE low)
+      if (_es == nullptr) { DEBUGSR_PRINTLN(F("AR: ES8311 create failed")); return; }
+
+      const es8311_resolution_t res =
+        (I2S_SAMPLE_RESOLUTION == I2S_BITS_PER_SAMPLE_16BIT) ? ES8311_RESOLUTION_16 : ES8311_RESOLUTION_32;
+      // {mclk_inverted, sclk_inverted, mclk_from_mclk_pin, mclk_frequency, sample_frequency}
+      es8311_clock_config_t clk = { false, false, false, 0, _sr };
+      if (es8311_init(_es, &clk, res, res) != ESP_OK) {
+        DEBUGSR_PRINTLN(F("AR: ES8311 init failed (clock/coeff for this rate?)"));
+      }
+
+      { // I2C sanity: es8311_write_reg() ignores NAKs, so es8311_init "succeeds" even with no
+        // codec on the bus. Verify by READING the chip-ID regs (a read needs a real ACK).
+        auto rd = [](uint8_t reg)->uint8_t {
+          Wire.beginTransmission((uint8_t)ES8311_ADDRRES_0); Wire.write(reg); Wire.endTransmission(false);
+          Wire.requestFrom((uint8_t)ES8311_ADDRRES_0, (uint8_t)1); return Wire.available() ? Wire.read() : 0xFF;
+        };
+        Serial.printf("[AR] ES8311@0x18 on SDA=%d/SCL=%d  ID 0xFD/0xFE = %02X/%02X (expect 83/11)\n",
+                      (int)i2c_sda, (int)i2c_scl, rd(0xFD), rd(0xFE));
+      }
+
+      es8311_microphone_config(_es, false);              // false = analog mic (not PDM)
+      es8311_microphone_gain_set(_es, ES8311_MIC_GAIN);
+
+      // Configure I2S last. ESP is I2S master; Echo Base has no MCLK -> mclkPin = -1.
+      I2SSource::initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
+    }
+
+    void deinitialize() {
+      I2SSource::deinitialize();
+      if (_es) { es8311_delete(_es); _es = nullptr; }
+    }
+};
+
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 2, 0)
 #if !defined(SOC_I2S_SUPPORTS_ADC) && !defined(SOC_I2S_SUPPORTS_ADC_DAC)
   #warning this MCU does not support analog sound input
