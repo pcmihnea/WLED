@@ -155,27 +155,34 @@ class Atoms3rDisplayUsermod : public Usermod {
 
       if (showPreview) {
         d->drawFastHLine(0, 88, d->width(), DIM565);
-        int nb = (int)BusManager::getNumBusses();
-        int rows = nb < 2 ? (nb<1?1:nb) : 2;
-        int top = 91, rh = ((d->height()-top)/rows) - 2;
-        for (int r = 0; r < rows; r++) drawBusRow(d, r, top + r*(rh+2), rh);
+        int top = 91, rh = ((d->height()-top)/2) - 2;   // fixed 2-row height (single seg keeps same size)
+        int shown = 0;
+        for (int i = 0; i < (int)strip.getSegmentsNum() && shown < 2; i++) {
+          Segment& sg = strip.getSegment(i);
+          if (!sg.isActive()) continue;
+          drawSegRow(d, sg, i, top + shown*(rh+2), rh);
+          shown++;
+        }
       }
 
       if (useCanvas) canvas.pushSprite(0, 0);
     }
 
-    void drawBusRow(lgfx::LovyanGFX* d, int idx, int y, int h) {
+    // one row = one segment: draw exactly seg.length() cells tiled across full width
+    void drawSegRow(lgfx::LovyanGFX* d, Segment& seg, int id, int y, int h) {
       if (h < 3) return;
-      Bus* b = BusManager::getBus(idx);
       int W = d->width();
-      if (!b || !b->getLength()) { d->drawRect(0, y, W, h, DIM565); return; }
-      uint16_t start = b->getStart(), len = b->getLength();
-      for (int x = 0; x < W; x++) {
-        uint32_t c = strip.getPixelColor(start + (uint32_t)x * len / W);
-        d->drawFastVLine(x, y, h, d->color888((c>>16)&0xFF, (c>>8)&0xFF, c&0xFF));
+      uint16_t start = seg.start, len = seg.length();
+      if (!len) { d->drawRect(0, y, W, h, DIM565); return; }
+      for (uint16_t i = 0; i < len; i++) {
+        int x0 = (int)((uint32_t)i * W / len);
+        int x1 = (int)((uint32_t)(i + 1) * W / len);
+        if (x1 <= x0) continue;                       // sub-pixel cell, skip
+        uint32_t c = strip.getPixelColor(start + i);
+        d->fillRect(x0, y, x1 - x0, h, d->color888((c>>16)&0xFF, (c>>8)&0xFF, c&0xFF));
       }
       d->drawRect(0, y, W, h, DIM565);
-      field(d, 2, y+1, BASECOL, "S%d", idx+1);
+      field(d, 2, y+1, BASECOL, "S%d", id+1);
     }
 
   public:
