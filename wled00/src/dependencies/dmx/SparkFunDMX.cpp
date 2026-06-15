@@ -32,7 +32,10 @@ Distributed as-is; no warranty is given.
 
 static const int enablePin = -1;		// disable the enable pin because it is not needed
 static const int rxPin = -1;       // disable the receiving pin because it is not needed - softhack007: Pin=-1 means "use default" not "disable"
-static const int txPin = 17;        // transmit DMX data over this pin (default is pin 2)
+#ifndef WLED_DMX_TX_PIN
+  #define WLED_DMX_TX_PIN 17        // ESP32 DMX TX default (e.g. esp32_wroom_32); override per build env with -D WLED_DMX_TX_PIN=<gpio>
+#endif
+static const int txPin = WLED_DMX_TX_PIN;  // transmit DMX data over this pin (UART2 TX, routed via GPIO matrix)
 
 //DMX value array and size. Entry 0 will hold startbyte, so we need 512+1 elements
 static uint8_t dmxData[dmxMaxChannel+1] = { 0 };
