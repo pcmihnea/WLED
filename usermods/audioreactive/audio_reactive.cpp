@@ -794,6 +794,8 @@ class AudioReactive : public Usermod {
     #else
     int8_t mclkPin = MCLK_PIN;
     #endif
+    uint8_t es8311Gain = 1;    // ES8311 input-gain preset: 0=Low 1=Mid 2=High 3=Max (codec types only)
+    uint8_t es8311Channel = 0; // ES8311 mono I2S slot: 0=Left 1=Right
 #endif
 
     // new "V2" audiosync struct - 44 Bytes
@@ -1445,7 +1447,11 @@ class AudioReactive : public Usermod {
           audioSource = new ES8311Source(SAMPLE_RATE, BLOCK_SIZE);
           useMicFilter = false;
           delay(100);
-          if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
+          if (audioSource) {
+            audioSource->setCodecChannel(es8311Channel);   // select mono slot before I2S init
+            audioSource->setCodecGain(es8311Gain);          // stored now, applied once the codec is up in initialize()
+            audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
+          }
           break;
 
         #if  !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3) && !defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -2039,6 +2045,8 @@ class AudioReactive : public Usermod {
       pinArray.add(i2swsPin);
       pinArray.add(i2sckPin);
       pinArray.add(mclkPin);
+      dmic[F("es8311gain")] = es8311Gain;     // ES8311 codec knobs (ignored by other mic types)
+      dmic[F("es8311chan")] = es8311Channel;
 
       JsonObject cfg = top.createNestedObject(FPSTR(_config));
       cfg[F("squelch")] = soundSquelch;
@@ -2111,6 +2119,9 @@ class AudioReactive : public Usermod {
       configComplete &= getJsonValue(top[FPSTR(_digitalmic)]["pin"][1], i2swsPin);
       configComplete &= getJsonValue(top[FPSTR(_digitalmic)]["pin"][2], i2sckPin);
       configComplete &= getJsonValue(top[FPSTR(_digitalmic)]["pin"][3], mclkPin);
+      configComplete &= getJsonValue(top[FPSTR(_digitalmic)][F("es8311gain")], es8311Gain);
+      configComplete &= getJsonValue(top[FPSTR(_digitalmic)][F("es8311chan")], es8311Channel);
+      if (audioSource) { audioSource->setCodecGain(es8311Gain); audioSource->setCodecChannel(es8311Channel); } // live codec tuning (no reboot)
 
       configComplete &= getJsonValue(top[FPSTR(_config)][F("squelch")], soundSquelch);
       configComplete &= getJsonValue(top[FPSTR(_config)][F("gain")],    sampleGain);
@@ -2164,7 +2175,17 @@ class AudioReactive : public Usermod {
       uiScript.print(F("addOption(dd,'None - network receive only',"));
       uiScript.print(SR_DMTYPE_NETWORK_ONLY);
       uiScript.print(F(");"));
-    
+
+      // ES8311 codec knobs (only relevant when mic type = ES8311; applied live over I2C)
+      uiScript.print(F("dd=addDropdown(ux,'digitalmic:es8311gain');"));
+      uiScript.print(F("addOption(dd,'ES8311 gain: Low (loud/near music)',0);"));
+      uiScript.print(F("addOption(dd,'ES8311 gain: Mid (default)',1);"));
+      uiScript.print(F("addOption(dd,'ES8311 gain: High (+24dB)',2);"));
+      uiScript.print(F("addOption(dd,'ES8311 gain: Max (far-field/voice)',3);"));
+      uiScript.print(F("dd=addDropdown(ux,'digitalmic:es8311chan');"));
+      uiScript.print(F("addOption(dd,'ES8311 channel: Left',0);"));
+      uiScript.print(F("addOption(dd,'ES8311 channel: Right',1);"));
+
       uiScript.print(F("dd=addDropdown(ux,'config:AGC');"));
       uiScript.print(F("addOption(dd,'Off',0);"));
       uiScript.print(F("addOption(dd,'Normal',1);"));
