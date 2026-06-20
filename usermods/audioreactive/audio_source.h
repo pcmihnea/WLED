@@ -142,7 +142,13 @@ class AudioSource {
     /* identify Audiosource type - I2S-ADC or I2S-digital */
     typedef enum{Type_unknown=0, Type_I2SAdc=1, Type_I2SDigital=2} AudioSourceType;
     virtual AudioSourceType getType(void) {return(Type_I2SDigital);}               // default is "I2S digital source" - ADC type overrides this method
- 
+
+    /* Optional codec controls. No-ops for plain mics; codec sources (e.g. ES8311) override them.
+       setCodecGain applies an input-gain preset live over I2C; setCodecChannel selects the mono
+       I2S slot (takes effect on the next initialize()). Lets the UI tune a codec without a reflash. */
+    virtual void setCodecGain(uint8_t /*preset*/) {}
+    virtual void setCodecChannel(uint8_t /*ch*/) {}
+
   protected:
     /* Post-process audio sample - currently on needed for I2SAdcSource*/
     virtual I2S_datatype postProcessSample(I2S_datatype sample_in) {return(sample_in);}   // default method can be overriden by instances (ADC) that need sample postprocessing
@@ -574,14 +580,44 @@ class ES8388Source : public I2SSource {
 */
 #include "es8311.h"
 
-#ifndef ES8311_MIC_GAIN
-  #define ES8311_MIC_GAIN ES8311_MIC_GAIN_30DB   // ADC gain scale-up for the (quiet) MEMS mic
+// ES8311 input-gain presets, selectable live from the WLED GUI (no reflash). Each maps to the
+// codec's three gain stages {reg14 analog PGA, reg16 digital scale-up, reg17 ADC volume}:
+//   Low  = reduced analog PGA, max ADC headroom (loud / near music)
+//   Mid  = full analog PGA, no digital scale-up (neutral; pair with WLED AGC)   <-- default
+//   High = full PGA + ~24 dB digital (quieter rooms)
+//   Max  = full PGA + 42 dB digital (far-field / voice; matches M5 ESPHome)
+// reg17 stays 0xC8 (M5 value; the driver default 0xFF over-drives the ADC) for all presets.
+#ifndef ES8311_GAIN_DEFAULT
+  #define ES8311_GAIN_DEFAULT 1     // 0=Low 1=Mid 2=High 3=Max  (compile-time default; overridable in UI)
+#endif
+#ifndef ES8311_I2S_CHANNEL
+  #define ES8311_I2S_CHANNEL I2S_CHANNEL_FMT_ONLY_LEFT    // ES8311 mono ADC (M5 uses left); duplicated on both slots anyway
 #endif
 
 class ES8311Source : public I2SSource {
   private:
     es8311_handle_t _es = nullptr;
     int _sr;
+    uint8_t _gainPreset = ES8311_GAIN_DEFAULT;
+    uint8_t _channel = (ES8311_I2S_CHANNEL == I2S_CHANNEL_FMT_ONLY_RIGHT) ? 1 : 0;
+
+    // input-gain preset -> {reg14 analog PGA, reg16 digital scale-up, reg17 ADC volume}
+    static void gainRegs(uint8_t p, uint8_t &r14, uint8_t &r16, uint8_t &r17) {
+      r17 = 0xC8;                              // ADC volume (M5 value) for all presets
+      switch (p) {
+        case 0:  r14 = 0x12; r16 = 0; break;   // Low  - reduced analog PGA, max headroom
+        case 2:  r14 = 0x1A; r16 = 4; break;   // High - full PGA + ~24 dB digital
+        case 3:  r14 = 0x1A; r16 = 7; break;   // Max  - full PGA + 42 dB digital (ESPHome)
+        default: r14 = 0x1A; r16 = 0; break;   // Mid  - full PGA, neutral
+      }
+    }
+    void applyGain(uint8_t p) {
+      if (!_es) return;                        // live I2C write only once the codec exists
+      uint8_t r14, r16, r17; gainRegs(p, r14, r16, r17);
+      es8311_write_reg(_es, 0x14, r14);
+      es8311_write_reg(_es, 0x16, r16);
+      es8311_write_reg(_es, 0x17, r17);
+    }
 
     #ifdef ES8311_PI4IOE_ADDR
     // Echo Base gates the codec / speaker-PA via a PI4IOE5V6408 I/O expander.
@@ -600,7 +636,7 @@ class ES8311Source : public I2SSource {
   public:
     ES8311Source(SRate_t sampleRate, int blockSize, float sampleScale = 1.0f, bool i2sMaster=true) :
       I2SSource(sampleRate, blockSize, sampleScale), _sr((int)sampleRate) {
-      _config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+      _config.channel_format = ES8311_I2S_CHANNEL;
     };
 
     void initialize(int8_t i2swsPin, int8_t i2ssdPin, int8_t i2sckPin, int8_t mclkPin) {
@@ -636,10 +672,11 @@ class ES8311Source : public I2SSource {
                       (int)i2c_sda, (int)i2c_scl, rd(0xFD), rd(0xFE));
       }
 
-      es8311_microphone_config(_es, false);              // false = analog mic (not PDM)
-      es8311_microphone_gain_set(_es, ES8311_MIC_GAIN);
+      es8311_microphone_config(_es, false);   // analog mic (not PDM); gain regs overridden by the preset next
+      applyGain(_gainPreset);                 // reg14/16/17 from the GUI-selected input-gain preset
 
       // Configure I2S last. ESP is I2S master; Echo Base has no MCLK -> mclkPin = -1.
+      _config.channel_format = _channel ? I2S_CHANNEL_FMT_ONLY_RIGHT : I2S_CHANNEL_FMT_ONLY_LEFT;
       I2SSource::initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
     }
 
@@ -647,6 +684,10 @@ class ES8311Source : public I2SSource {
       I2SSource::deinitialize();
       if (_es) { es8311_delete(_es); _es = nullptr; }
     }
+
+    // GUI knobs (driven from the AudioReactive usermod config)
+    void setCodecGain(uint8_t preset) override { _gainPreset = preset; applyGain(preset); }  // live over I2C if codec is up
+    void setCodecChannel(uint8_t ch) override  { _channel = ch ? 1 : 0; }                     // applied on next initialize()
 };
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 2, 0)
