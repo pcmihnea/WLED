@@ -459,6 +459,7 @@ WLED_GLOBAL bool arlsForceMaxBri _INIT(false);                    // enable to f
  #else //ESP32
   WLED_GLOBAL SparkFunDMX dmx;
  #endif
+  WLED_GLOBAL bool dmxOutputUsermod _INIT(false);                   // when true, a usermod (e.g. movinghead) owns DMX output -> built-in handleDMXOutput() stands down
   WLED_GLOBAL uint16_t e131ProxyUniverse _INIT(0);                  // output this E1.31 (sACN) / ArtNet universe via MAX485 (0 = disabled)
   // dmx CONFIG
   WLED_GLOBAL byte DMXChannels _INIT(7);        // number of channels per fixture

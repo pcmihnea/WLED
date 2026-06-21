@@ -1,0 +1,7 @@
+{
+  "name": "movinghead",
+  "build": {
+    "flags": [ "-D USERMOD_MOVINGHEAD" ],
+    "libArchive": false
+  }
+}
