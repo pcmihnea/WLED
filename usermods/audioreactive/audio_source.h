@@ -662,15 +662,17 @@ class ES8311Source : public I2SSource {
         DEBUGSR_PRINTLN(F("AR: ES8311 init failed (clock/coeff for this rate?)"));
       }
 
-      { // I2C sanity: es8311_write_reg() ignores NAKs, so es8311_init "succeeds" even with no
-        // codec on the bus. Verify by READING the chip-ID regs (a read needs a real ACK).
+      #ifdef SR_DEBUG
+      { // diagnostic: es8311_write_reg() ignores NAKs, so verify the codec really ACKs by
+        // READING its chip-ID regs (a read needs a real ACK). Expect 83/11.
         auto rd = [](uint8_t reg)->uint8_t {
           Wire.beginTransmission((uint8_t)ES8311_ADDRRES_0); Wire.write(reg); Wire.endTransmission(false);
           Wire.requestFrom((uint8_t)ES8311_ADDRRES_0, (uint8_t)1); return Wire.available() ? Wire.read() : 0xFF;
         };
-        Serial.printf("[AR] ES8311@0x18 on SDA=%d/SCL=%d  ID 0xFD/0xFE = %02X/%02X (expect 83/11)\n",
-                      (int)i2c_sda, (int)i2c_scl, rd(0xFD), rd(0xFE));
+        DEBUGSR_PRINTF("[AR] ES8311@0x18 SDA=%d/SCL=%d ID 0xFD/0xFE = %02X/%02X (expect 83/11)\n",
+                       (int)i2c_sda, (int)i2c_scl, rd(0xFD), rd(0xFE));
       }
+      #endif
 
       es8311_microphone_config(_es, false);   // analog mic (not PDM); gain regs overridden by the preset next
       applyGain(_gainPreset);                 // reg14/16/17 from the GUI-selected input-gain preset

@@ -16,6 +16,8 @@ void handleDMXOutput()
 {
   // don't act, when in DMX Proxy mode
   if (e131ProxyUniverse != 0) return;
+  // a usermod owns the DMX bus (writes + transmits itself) -> built-in LED->DMX stands down
+  if (dmxOutputUsermod) return;
 
   uint8_t brightness = strip.getBrightness();
 
