@@ -29,7 +29,7 @@
 
 bool dmxStarted = false;
 #ifndef WLED_DMX_TX_PIN
-  #define WLED_DMX_TX_PIN 2		//default on ESP8266; override per build env with -D WLED_DMX_TX_PIN=<gpio>
+  #define WLED_DMX_TX_PIN 2
 #endif
 int sendPin = WLED_DMX_TX_PIN;
 
