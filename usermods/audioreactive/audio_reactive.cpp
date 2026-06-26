@@ -74,6 +74,13 @@
 #define MAX_PALETTES 3
 
 static volatile bool disableSoundProcessing = false;      // if true, sound processing (FFT, filters, AGC) will be suspended. "volatile" as its shared between tasks.
+static bool audioSourceFailed = false;        // true if a local mic/codec was selected but failed to initialise (e.g. Echo Base unplugged) - distinguishes a HW fault from AR simply being off
+// hot-recovery: I2S pins captured at setup() so the FFT task can safely re-init a failed codec
+// IN ITS OWN CONTEXT (same task as getSamples -> no cross-task I2S race / no kernel panic risk).
+#ifndef AR_CODEC_RECOVERY_MS
+  #define AR_CODEC_RECOVERY_MS 3000           // how often the FFT task re-probes a failed codec (cheap single I2C read)
+#endif
+static int8_t arWsPin = -1, arSdPin = -1, arCkPin = -1, arMclkPin = -1;
 static uint8_t audioSyncEnabled = 0;          // bit field: bit 0 - send, bit 1 - receive (config value)
 static bool udpSyncConnected = false;         // UDP connection status -> true if connected to multicast group
 
@@ -349,6 +356,28 @@ void FFTcode(void * parameter)
   for(;;) {
     delay(1);           // DO NOT DELETE THIS LINE! It is needed to give the IDLE(0) task enough time and to keep the watchdog happy.
                         // taskYIELD(), yield(), vTaskDelay() and esp_task_wdt_feed() didn't seem to work.
+
+    // --- codec hot-recovery (runs in THIS task, the only one that touches i2s_read -> no cross-task
+    //     I2S race / no kernel-panic risk). If a codec source exists but never initialized (boot fault
+    //     or a transient), re-probe cheaply every few seconds and run a full re-init only once the codec
+    //     actually answers. getSamples() is guarded by _initialized, so until then the source is silent. ---
+    if (audioSource && !audioSource->isInitialized()) {
+      static unsigned long lastReco = 0;
+      if (millis() - lastReco > AR_CODEC_RECOVERY_MS) {
+        lastReco = millis();
+        if (audioSource->codecQuickCheck()) {                 // cheap single I2C read; skip heavy init if still absent
+          DEBUGSR_PRINTLN(F("[AR] codec detected - hot re-init from FFT task"));
+          audioSource->initialize(arWsPin, arSdPin, arCkPin, arMclkPin);   // safe here: same task as getSamples
+          if (audioSource->isInitialized()) {
+            audioSourceFailed = false;
+            disableSoundProcessing = false;
+            DEBUGSR_PRINTLN(F("[AR] hot-recovery OK - audio restored"));
+          }
+        }
+      }
+      vTaskDelayUntil(&xLastWakeTime, xFrequency);            // nothing to sample yet -> release the CPU
+      continue;
+    }
 
     // Don't run FFT computing code if we're in Receive mode or in realtime mode
     if (disableSoundProcessing || (audioSyncEnabled & 0x02)) {
@@ -1393,6 +1422,8 @@ class AudioReactive : public Usermod {
         if ((i2sckPin == I2S_PIN_NO_CHANGE) && (i2ssdPin >= 0) && (i2swsPin >= 0) && ((dmType == 1) || (dmType == 4)) ) dmType = 5;   // dummy user support: SCK == -1 --means--> PDM microphone
       #endif
 
+      audioSourceFailed = false;   // cleared here; set again below only if a selected local source fails to init
+      arWsPin = i2swsPin; arSdPin = i2ssdPin; arCkPin = i2sckPin; arMclkPin = mclkPin;  // capture for FFT-task hot-recovery
       switch (dmType) {
       #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32S3)
         // stub cases for not-yet-supported I2S modes on other ESP32 chips
@@ -1451,6 +1482,12 @@ class AudioReactive : public Usermod {
             audioSource->setCodecChannel(es8311Channel);   // select mono slot before I2S init
             audioSource->setCodecGain(es8311Gain);          // stored now, applied once the codec is up in initialize()
             audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
+            if (!audioSource->isInitialized()) {            // codec/Echo Base absent or init failed
+              DEBUGSR_PRINTLN(F("AR: ES8311 not initialized; kept for FFT-task hot-recovery"));
+              audioSourceFailed = true;                     // flag the HW fault (UI/display); source kept so the
+              // FFT task can re-init it when the codec returns - getSamples() is guarded by _initialized,
+              // so a kept-but-uninitialized source safely yields silence until recovery succeeds.
+            }
           }
           break;
 
@@ -1690,6 +1727,10 @@ class AudioReactive : public Usermod {
     bool getUMData(um_data_t **data) override
     {
       if (!data || !enabled) return false; // no pointer provided by caller or not enabled -> exit
+      // a local source that exists but isn't initialized (codec fault, pending hot-recovery) has no real
+      // audio -> report "no data" so consumers fall back and the display/Info show the fault, not stale zeros.
+      // (still report data in UDP-receive mode, where there is no local source.)
+      if (audioSource && !audioSource->isInitialized() && !(audioSyncEnabled & 0x02)) return false;
       *data = um_data;
       return true;
     }
@@ -1816,6 +1857,13 @@ class AudioReactive : public Usermod {
       uiDomString += F("\">&#xe08f;</i>");
       uiDomString += F("</button>");
       infoArr.add(uiDomString);
+
+#ifdef ARDUINO_ARCH_ESP32
+      if (audioSourceFailed) {   // HW fault is shown even when AR has auto-disabled itself (distinct from a user "off")
+        infoArr.add(F("&#9888; microphone not detected"));
+        infoArr.add(F(" - check Echo Base / I2C"));
+      }
+#endif
 
       if (enabled) {
 #ifdef ARDUINO_ARCH_ESP32

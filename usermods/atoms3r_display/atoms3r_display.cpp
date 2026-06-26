@@ -136,6 +136,19 @@ class Atoms3rDisplayUsermod : public Usermod {
       field(d, 2, 37, BASECOL, "PSRAM: %u.%02uM",
             (unsigned)(ESP.getFreePsram()/1048576), (unsigned)((ESP.getFreePsram()%1048576)*100/1048576));
 
+      // audio status (no-PC indicator): live mic level when AudioReactive is running, else a fault marker.
+      // getUMData() returns false when AR is disabled OR auto-disabled by a codec fault -> "MIC --".
+      {
+        um_data_t* um = nullptr;
+        if (UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) && um) {
+          int pct = (int)(*(float*)um->u_data[0] / 255.0f * 100.0f);
+          pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+          fieldR(d, d->width()-2, 37, pct > 2 ? TFT_GREEN : BASECOL, "MIC %d%%", pct);
+        } else {
+          fieldR(d, d->width()-2, 37, TFT_RED, "MIC --");
+        }
+      }
+
       unsigned long s = millis()/1000;
       if (apActive)            field(d, 2, 49, TFT_ORANGE, "NET: AP");
       else if (WLED_CONNECTED) field(d, 2, 49, sigCol(getSignalQuality(WiFi.RSSI())), "RSSI: %d", (int)WiFi.RSSI());
