@@ -160,8 +160,9 @@ esp_err_t es8311_write_reg(es8311_handle_t dev, uint8_t reg_addr, uint8_t data)
     const uint8_t write_buf[2] = {reg_addr, data};
     _wire->beginTransmission(es->dev_addr);
     _wire->write(write_buf, sizeof(write_buf));
-    _wire->endTransmission();
-    return ESP_OK;
+    // Honor the I2C ACK/NAK so callers (and es8311_init's ESP_RETURN_ON_ERROR) can actually
+    // detect an absent/asleep codec instead of silently "succeeding". endTransmission()==0 -> ACK.
+    return (_wire->endTransmission() == 0) ? ESP_OK : ESP_FAIL;
 }
 
 static inline esp_err_t es8311_read_reg(es8311_handle_t dev, uint8_t reg_addr, uint8_t *reg_value)
@@ -169,8 +170,9 @@ static inline esp_err_t es8311_read_reg(es8311_handle_t dev, uint8_t reg_addr, u
     es8311_dev_t *es = (es8311_dev_t *)dev;
     _wire->beginTransmission(es->dev_addr);
     _wire->write(&reg_addr, 1);
-    _wire->endTransmission();
-    _wire->requestFrom(static_cast<uint16_t>(es->dev_addr), static_cast<uint8_t>(1));
+    if (_wire->endTransmission(false) != 0) return ESP_FAIL;          // repeated-start; bail on NAK
+    if (_wire->requestFrom(static_cast<uint16_t>(es->dev_addr), static_cast<uint8_t>(1)) != 1) return ESP_FAIL;
+    if (!_wire->available()) return ESP_FAIL;
     *reg_value = _wire->read();
     return ESP_OK;
 }
