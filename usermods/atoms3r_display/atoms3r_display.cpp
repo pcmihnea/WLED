@@ -122,53 +122,57 @@ class Atoms3rDisplayUsermod : public Usermod {
       d->fillScreen(TFT_BLACK);
       d->setTextSize(1);
 
-      int fps = (int)strip.getFps();
-      field (d, 2,        1, fpsCol(fps), "FPS: %d", fps);
-      fieldR(d, d->width()-2, 1, BASECOL, "BRI: %d%%", (int)bri*100/255);
+      // Header fields ordered by rate-of-change (most dynamic first), paired 2/row in reading order:
+      //   row1: MIC | FPS    row2: RSSI | UP    row3: BRI | PWR    row4: HEAP | PSRAM
+      const int RW = d->width()-2;
 
-      unsigned used = BusManager::currentMilliamps(), cap = BusManager::ablMilliampsMax();
-      bool thr = cap && used >= cap;
-      if (cap) field(d, 2, 13, thr?TFT_RED:BASECOL, "PWR: %u/%umA", used, cap);
-      else     field(d, 2, 13, BASECOL,             "PWR: %umA", used);
-
-      uint32_t fh = ESP.getFreeHeap();
-      field(d, 2, 25, fh<20480?TFT_RED:BASECOL, "HEAP: %u/%uK", (unsigned)(fh/1024), (unsigned)(ESP.getMinFreeHeap()/1024));
-      field(d, 2, 37, BASECOL, "PSRAM: %u.%02uM",
-            (unsigned)(ESP.getFreePsram()/1048576), (unsigned)((ESP.getFreePsram()%1048576)*100/1048576));
-
-      // audio status (no-PC indicator): live mic level when AudioReactive is running, else a fault marker.
-      // getUMData() returns false when AR is disabled OR auto-disabled by a codec fault -> "MIC --".
+      // row 1 (y=1): MIC (live audio level / fault marker) | FPS
       {
-        um_data_t* um = nullptr;
+        um_data_t* um = nullptr;   // getUMData() returns false when AR is off OR codec-faulted -> "MIC --"
         if (UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) && um) {
           int pct = (int)(*(float*)um->u_data[0] / 255.0f * 100.0f);
           pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
-          fieldR(d, d->width()-2, 37, pct > 2 ? TFT_GREEN : BASECOL, "MIC %d%%", pct);
+          field(d, 2, 1, pct > 2 ? TFT_GREEN : BASECOL, "MIC: %d%%", pct);
         } else {
-          fieldR(d, d->width()-2, 37, TFT_RED, "MIC --");
+          field(d, 2, 1, TFT_RED, "MIC: --");
         }
       }
+      int fps = (int)strip.getFps();
+      fieldR(d, RW, 1, fpsCol(fps), "FPS: %d", fps);
 
+      // row 2 (y=13): RSSI / NET | UP
       unsigned long s = millis()/1000;
-      if (apActive)            field(d, 2, 49, TFT_ORANGE, "NET: AP");
-      else if (WLED_CONNECTED) field(d, 2, 49, sigCol(getSignalQuality(WiFi.RSSI())), "RSSI: %d", (int)WiFi.RSSI());
-      else                     field(d, 2, 49, TFT_RED,    "NET: --");
-      fieldR(d, d->width()-2, 49, BASECOL, "UP: %lu:%02lu", s/3600, (s/60)%60);
+      if (apActive)            field(d, 2, 13, TFT_ORANGE, "NET: AP");
+      else if (WLED_CONNECTED) field(d, 2, 13, sigCol(getSignalQuality(WiFi.RSSI())), "RSSI: %d", (int)WiFi.RSSI());
+      else                     field(d, 2, 13, TFT_RED,    "NET: --");
+      fieldR(d, RW, 13, BASECOL, "UP: %lu:%02lu", s/3600, (s/60)%60);
 
-      d->drawFastHLine(0, 61, d->width(), DIM565);
+      // row 3 (y=25): BRI | PWR (used mA; red when at/above the ABL cap)
+      field(d, 2, 25, BASECOL, "BRI: %d%%", (int)bri*100/255);
+      unsigned used = BusManager::currentMilliamps(), cap = BusManager::ablMilliampsMax();
+      bool thr = cap && used >= cap;
+      fieldR(d, RW, 25, thr?TFT_RED:BASECOL, "PWR:%umA", used);
+
+      // row 4 (y=37): HEAP (free) | PSRAM (free)
+      uint32_t fh = ESP.getFreeHeap();
+      field(d, 2, 37, fh<20480?TFT_RED:BASECOL, "HEAP:%uK", (unsigned)(fh/1024));
+      fieldR(d, RW, 37, BASECOL, "PSR:%u.%01uM",
+             (unsigned)(ESP.getFreePsram()/1048576), (unsigned)((ESP.getFreePsram()%1048576)*10/1048576));
+
+      d->drawFastHLine(0, 49, d->width(), DIM565);
 
       if (realtimeMode) {
-        field(d, 2, 64, TFT_MAGENTA, "LIVE: %s", realtimeIP.toString().c_str());
+        field(d, 2, 52, TFT_MAGENTA, "LIVE: %s", realtimeIP.toString().c_str());
       } else {
         extractModeName(seg.mode, JSON_mode_names, nm, sizeof(nm)-1);
-        field(d, 2, 64, BASECOL, "FX: %s", nm);
+        field(d, 2, 52, BASECOL, "FX: %s", nm);
       }
       extractModeName(seg.palette, JSON_palette_names, nm, sizeof(nm)-1);
-      field(d, 2, 76, BASECOL, "PAL: %s", nm);
+      field(d, 2, 64, BASECOL, "PAL: %s", nm);
 
       if (showPreview) {
-        d->drawFastHLine(0, 88, d->width(), DIM565);
-        int top = 91, rh = ((d->height()-top)/2) - 2;   // fixed 2-row height (single seg keeps same size)
+        d->drawFastHLine(0, 76, d->width(), DIM565);
+        int top = 79, rh = ((d->height()-top)/2) - 2;   // fixed 2-row height (single seg keeps same size)
         int shown = 0;
         for (int i = 0; i < (int)strip.getSegmentsNum() && shown < 2; i++) {
           Segment& sg = strip.getSegment(i);
