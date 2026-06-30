@@ -15,13 +15,26 @@
 //  rings are visually minor, so the motion energy is size-weighted toward the
 //  outer ring (the dominant one).
 //
-//  DMX out via WLED's SparkFunDMX global `dmx` (WLED_ENABLE_DMX); the built-in
-//  LED->DMX mapper stands down via dmxOutputUsermod.
+//  DMX out via esp_dmx on UART2/GPIO1 (real hardware break + MAB, DMA, continuously
+//  driven line). WLED's SparkFunDMX is disabled (WLED_ENABLE_DMX off) so it never runs.
 //
 //  Folder: usermods/movinghead/ { library.json, movinghead.cpp }
 // =============================================================================
 #include "wled.h"
 #include <math.h>
+
+// Real, hardware-timed DMX (proper break/MAB, DMA, continuously driven line) via esp_dmx -
+// supersedes WLED's SparkFunDMX (which fakes the break by baud-switching and tears the UART
+// down every frame). WLED_ENABLE_DMX is left OFF for this build so SparkFun never runs.
+#if defined(ARDUINO_ARCH_ESP32)
+  #include <esp_dmx.h>
+  #ifndef MH_DMX_PORT
+    #define MH_DMX_PORT DMX_NUM_2          // UART2
+  #endif
+  #ifndef MH_DMX_TX_PIN
+    #define MH_DMX_TX_PIN 1                // AtomS3R Port.A G1 = Unit-DMX Grove pin 4 (TXD)
+  #endif
+#endif
 
 #ifndef MH_DEFAULT_ADDR
   #define MH_DEFAULT_ADDR 1
@@ -58,6 +71,10 @@ class MovingHead : public Usermod {
     unsigned long lastFrame=0;
     bool inited=false;
 
+    // ---- DMX frame buffer (index 0 = start code, 1..512 = channel values) ----
+    uint8_t _pkt[513] = {0};
+    bool    _dmxReady = false;
+
     // ---- channel map per mode (offset from dmxAddr; -1 = absent) ----
     struct ChMap { int8_t pan, panF, tilt, tiltF, ptSpd, dim, strobe, zoom; int8_t ring[3][4]; };
     ChMap chmap() const {
@@ -66,9 +83,9 @@ class MovingHead : public Usermod {
       return ChMap{ 0,20,1,21, 2, 3, 16, 17, {{4,5,6,7},{8,9,10,11},{12,13,14,15}} };  // 24-ch (default)
     }
     inline void wr(int8_t off, uint8_t v) {
-      #ifdef WLED_ENABLE_DMX
-      if (off >= 0) dmx.write(dmxAddr + off, v);
-      #endif
+      if (off < 0) return;
+      int ch = dmxAddr + off;
+      if (ch >= 1 && ch <= 512) _pkt[ch] = v;   // 1-indexed; _pkt[0] stays the start code (0)
     }
     inline void wr16(int8_t hi, int8_t lo, uint16_t v) { wr(hi, v >> 8); wr(lo, v & 0xFF); }
 
@@ -118,16 +135,19 @@ class MovingHead : public Usermod {
   public:
     void setup() override {
       lastFrame = millis(); inited = true;
-      #ifdef WLED_ENABLE_DMX
-      dmx.initWrite(dmxAddr + 32);     // own the bus; clock out up to the fixture's channels
-      dmxOutputUsermod = enabled;      // built-in LED->DMX mapper stands down while we drive
+      #if defined(ARDUINO_ARCH_ESP32)
+      PinManager::allocatePin(MH_DMX_TX_PIN, true, PinOwner::UM_Unspecified);
+      if (!dmx_driver_is_installed(MH_DMX_PORT)) {
+        dmx_config_t cfg = DMX_CONFIG_DEFAULT;            // 250k baud, 176us break, 12us MAB
+        dmx_driver_install(MH_DMX_PORT, &cfg, DMX_INTR_FLAGS_DEFAULT);   // esp_dmx 3.1.1 signature
+      }
+      dmx_set_pin(MH_DMX_PORT, MH_DMX_TX_PIN, -1, -1);    // TX only (rx/rts unused)
+      dmx_set_baud_rate(MH_DMX_PORT, DMX_BAUD_RATE);
+      _dmxReady = dmx_driver_is_installed(MH_DMX_PORT);
       #endif
     }
 
     void loop() override {
-      #ifdef WLED_ENABLE_DMX
-      dmxOutputUsermod = enabled;
-      #endif
       if (!enabled) return;
       unsigned long now = millis();
       uint16_t period = 1000 / (fps ? fps : 40);
@@ -192,61 +212,83 @@ class MovingHead : public Usermod {
       }
       // (all unused fixture channels were already blanked to 0 above)
 
-      #ifdef WLED_ENABLE_DMX
-      dmx.update();
+      #if defined(ARDUINO_ARCH_ESP32)
+      if (_dmxReady) {                       // hardware-timed frame: real break + continuously driven line
+        _pkt[0] = 0;                          // DMX start code
+        dmx_write(MH_DMX_PORT, _pkt, 513);    // full universe (matches a standard controller)
+        dmx_send(MH_DMX_PORT, 513);
+        dmx_wait_sent(MH_DMX_PORT, pdMS_TO_TICKS(50));
+      }
       #endif
     }
 
-    // ---- config (Usermods menu) ----
+    // ---- DYNAMIC show controls -> live via the main-page "Moving Head" group + presets/API.
+    //      Relative/unitless params are exchanged as a human-friendly 0..100 here and scaled to
+    //      the internal 0..255 range, so the motion math is unchanged. (NOT in the usermod menu.) ----
+    static inline uint8_t to100(uint8_t v)  { return (uint8_t)((v*100 + 127) / 255); }
+    static inline uint8_t from100(int v)    { v = v<0?0:(v>100?100:v); return (uint8_t)((v*255 + 50) / 100); }
+    void addToJsonState(JsonObject& root) override {
+      JsonObject t = root.createNestedObject(F("MovingHead"));
+      t[F("speed")]=to100(speed); t[F("size")]=to100(size); t[F("pattern")]=pattern;
+      t[F("sens")]=to100(sensitivity); t[F("aDepth")]=to100(audioDepth); t[F("smooth")]=to100(smoothing);
+      t[F("zReact")]=zoomReact; t[F("zMan")]=to100(zoomManual); t[F("strobe")]=strobeMode; t[F("dimmer")]=dimmerMode;
+    }
+    void readFromJsonState(JsonObject& root) override {
+      JsonObject t = root[F("MovingHead")];
+      if (t.isNull()) return;
+      int v;
+      if (getJsonValue(t[F("speed")],  v)) speed       = from100(v);
+      if (getJsonValue(t[F("size")],   v)) size        = from100(v);
+      if (getJsonValue(t[F("sens")],   v)) sensitivity = from100(v);
+      if (getJsonValue(t[F("aDepth")], v)) audioDepth  = from100(v);
+      if (getJsonValue(t[F("smooth")], v)) smoothing   = from100(v);
+      if (getJsonValue(t[F("zMan")],   v)) zoomManual  = from100(v);
+      getJsonValue(t[F("pattern")], pattern);   // 0..10 index (passthrough)
+      getJsonValue(t[F("zReact")],  zoomReact); // toggles passthrough
+      getJsonValue(t[F("strobe")],  strobeMode);
+      getJsonValue(t[F("dimmer")],  dimmerMode);
+    }
+
+    // ---- STATIC setup -> Usermods menu only (pinout via build flags; everything else here) ----
     void addToConfig(JsonObject& root) override {
       JsonObject t = root.createNestedObject(F("MovingHead"));
-      // --- dynamic / show controls (rendered first) ---
       t[F("on")]=enabled;
-      t[F("pattern")]=pattern; t[F("speed")]=speed; t[F("size")]=size;
-      t[F("sens")]=sensitivity; t[F("aDepth")]=audioDepth; t[F("smooth")]=smoothing;
-      t[F("zReact")]=zoomReact; t[F("zMan")]=zoomManual;
-      t[F("dimmer")]=dimmerMode; t[F("strobe")]=strobeMode;
-      t[F("wMode")]=whiteMode; t[F("white")]=whiteMix;
-      // --- static / setup (rendered last) ---
       t[F("addr")]=dmxAddr; t[F("chMode")]=chMode; t[F("srcSeg")]=sourceSeg;
       t[F("panC")]=panCenter; t[F("panR")]=panRange; t[F("tiltC")]=tiltCenter; t[F("tiltR")]=tiltRange;
-      t[F("zMin")]=zoomNarrow; t[F("zMax")]=zoomWide; t[F("ptSpd")]=ptSpeed; t[F("fps")]=fps;
+      t[F("zMin")]=zoomNarrow; t[F("zMax")]=zoomWide; t[F("ptSpd")]=ptSpeed;
+      t[F("wMode")]=whiteMode; t[F("white")]=whiteMix; t[F("fps")]=fps;
     }
     bool readFromConfig(JsonObject& root) override {
       JsonObject t = root[F("MovingHead")];
       if (t.isNull()) return false;
       bool ok = true;
-      ok &= getJsonValue(t[F("on")],enabled,true);        ok &= getJsonValue(t[F("addr")],dmxAddr,MH_DEFAULT_ADDR);
+      ok &= getJsonValue(t[F("on")],enabled,true);
+      ok &= getJsonValue(t[F("addr")],dmxAddr,MH_DEFAULT_ADDR);
       ok &= getJsonValue(t[F("chMode")],chMode,24);       ok &= getJsonValue(t[F("srcSeg")],sourceSeg,0);
-      ok &= getJsonValue(t[F("pattern")],pattern,0);      ok &= getJsonValue(t[F("speed")],speed,90);
-      ok &= getJsonValue(t[F("size")],size,200);          ok &= getJsonValue(t[F("smooth")],smoothing,180);
-      ok &= getJsonValue(t[F("aDepth")],audioDepth,150);  ok &= getJsonValue(t[F("sens")],sensitivity,64);
       ok &= getJsonValue(t[F("panC")],panCenter,90);      ok &= getJsonValue(t[F("panR")],panRange,180);
       ok &= getJsonValue(t[F("tiltC")],tiltCenter,45);    ok &= getJsonValue(t[F("tiltR")],tiltRange,90);
       ok &= getJsonValue(t[F("zMin")],zoomNarrow,40);     ok &= getJsonValue(t[F("zMax")],zoomWide,220);
-      ok &= getJsonValue(t[F("zReact")],zoomReact,true);  ok &= getJsonValue(t[F("zMan")],zoomManual,128);
-      ok &= getJsonValue(t[F("strobe")],strobeMode,0);
-      ok &= getJsonValue(t[F("ptSpd")],ptSpeed,0);        ok &= getJsonValue(t[F("wMode")],whiteMode,1);
-      ok &= getJsonValue(t[F("white")],whiteMix,128);     ok &= getJsonValue(t[F("dimmer")],dimmerMode,1);
+      ok &= getJsonValue(t[F("ptSpd")],ptSpeed,0);
+      ok &= getJsonValue(t[F("wMode")],whiteMode,1);      ok &= getJsonValue(t[F("white")],whiteMix,128);
       ok &= getJsonValue(t[F("fps")],fps,40);
       return ok;
     }
     void appendConfigData(Print& uiScript) override {
       uiScript.print(F("ux='MovingHead';"));
       uiScript.print(F("dd=addDropdown(ux,'chMode');addOption(dd,'16-ch',16);addOption(dd,'24-ch (3 rings)',24);addOption(dd,'32-ch',32);"));
-      uiScript.print(F("dd=addDropdown(ux,'pattern');addOption(dd,'Circle',0);addOption(dd,'Figure-8',1);addOption(dd,'Lissajous 3:2',2);addOption(dd,'Lissajous 5:4',3);addOption(dd,'Sweep H',4);addOption(dd,'Sweep V',5);addOption(dd,'Diagonal',6);addOption(dd,'Spiral',7);addOption(dd,'Sway',8);addOption(dd,'Random-ease',9);addOption(dd,'Beat-step',10);"));
-      uiScript.print(F("dd=addDropdown(ux,'strobe');addOption(dd,'Off',0);addOption(dd,'Beat hits',1);"));
-      uiScript.print(F("dd=addDropdown(ux,'dimmer');addOption(dd,'Full',0);addOption(dd,'Energy',1);"));
-      uiScript.print(F("dd=addDropdown(ux,'wMode');addOption(dd,'W: Off (RGB only)',0);addOption(dd,'W: Auto (pixel, else mix)',1);addOption(dd,'W: from RGB',2);"));
-      uiScript.print(F("addInfo(ux+':srcSeg',1,'WLED segment whose pixels colour the rings - run any (audio) effect on it');"));
-      uiScript.print(F("addInfo(ux+':addr',1,'DMX channel of Pan (fixture start)');"));
-      uiScript.print(F("addInfo(ux+':panR',1,'deg peak-to-peak (0-540 phys)');"));
-      uiScript.print(F("addInfo(ux+':tiltR',1,'deg peak-to-peak (0-270 phys)');"));
-      uiScript.print(F("addInfo(ux+':smooth',1,'higher = smoother motion');"));
-      uiScript.print(F("addInfo(ux+':aDepth',1,'how strongly the music grows movement (0 = steady)');"));
-      uiScript.print(F("addInfo(ux+':zReact',1,'on: zoom follows audio (zMin..zMax). off: hold zMan');"));
-      uiScript.print(F("addInfo(ux+':zMan',1,'fixed zoom when react is off - sweep 0..255 to confirm the beam moves');"));
-      uiScript.print(F("addInfo(ux+':white',1,'synthesized white amount from RGB peak (W modes Auto / from RGB)');"));
+      uiScript.print(F("dd=addDropdown(ux,'wMode');addOption(dd,'W: Off (RGB only)',0);addOption(dd,'W: Auto (pixel, else from RGB)',1);addOption(dd,'W: from RGB',2);"));
+      uiScript.print(F("addInfo(ux+':on',1,'enable the moving-head DMX output');"));
+      uiScript.print(F("addInfo(ux+':addr',1,'DMX start channel of the fixture (1-512)');"));
+      uiScript.print(F("addInfo(ux+':srcSeg',1,'WLED segment whose pixels colour the rings - run any audio effect on it');"));
+      uiScript.print(F("addInfo(ux+':panC',1,'pan centre, degrees (0-540)');"));
+      uiScript.print(F("addInfo(ux+':panR',1,'pan travel, degrees peak-to-peak (0-540)');"));
+      uiScript.print(F("addInfo(ux+':tiltC',1,'tilt centre, degrees (0-270)');"));
+      uiScript.print(F("addInfo(ux+':tiltR',1,'tilt travel, degrees peak-to-peak (0-270)');"));
+      uiScript.print(F("addInfo(ux+':zMin',1,'zoom DMX value at narrowest beam (0-255)');"));
+      uiScript.print(F("addInfo(ux+':zMax',1,'zoom DMX value at widest beam (0-255)');"));
+      uiScript.print(F("addInfo(ux+':ptSpd',1,'fixture pan/tilt-speed channel, 0 = fastest (0-255)');"));
+      uiScript.print(F("addInfo(ux+':white',1,'synthesized white amount from RGB peak (0-255), for W modes Auto / from RGB');"));
+      uiScript.print(F("addInfo(ux+':fps',1,'DMX refresh rate, frames per second (10-44)');"));
     }
 
     uint16_t getId() override { return USERMOD_ID_UNSPECIFIED; }
