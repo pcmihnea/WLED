@@ -273,6 +273,22 @@
 		</div>
 	</div>
 
+	<div id="MovingHead" class="tabcontent">
+		<p class="labels hd">Moving Head</p>
+		<div class="mhpanel">
+			<p class="mhhint">Live show controls. 0&ndash;100 = relative. Fixture wiring, mapping &amp; movement ranges live in Config &rarr; Usermods.</p>
+			<div class="mhrow"><div class="mhlbl"><b>Speed</b><small>base motion rate (0&ndash;100)</small></div><input type="range" min="0" max="100" value="35" id="mhSpeed" oninput="gId('mhSpeedV').innerText=this.value" onchange="MHset('speed',+this.value)"><span class="mhval" id="mhSpeedV">35</span></div>
+			<div class="mhrow"><div class="mhlbl"><b>Size</b><small>movement amplitude (0&ndash;100)</small></div><input type="range" min="0" max="100" value="78" id="mhSize" oninput="gId('mhSizeV').innerText=this.value" onchange="MHset('size',+this.value)"><span class="mhval" id="mhSizeV">78</span></div>
+			<div class="mhrow"><div class="mhlbl"><b>Pattern</b><small>motion shape</small></div><select id="mhPat" onchange="MHset('pattern',+this.value)"><option value="0">Circle</option><option value="1">Figure-8</option><option value="2">Lissajous 3:2</option><option value="3">Lissajous 5:4</option><option value="4">Sweep H</option><option value="5">Sweep V</option><option value="6">Diagonal</option><option value="7">Spiral</option><option value="8">Sway</option><option value="9">Random</option><option value="10">Beat-step</option></select></div>
+			<div class="mhrow"><div class="mhlbl"><b>Sensitivity</b><small>audio input gain (0&ndash;100)</small></div><input type="range" min="0" max="100" value="25" id="mhSens" oninput="gId('mhSensV').innerText=this.value" onchange="MHset('sens',+this.value)"><span class="mhval" id="mhSensV">25</span></div>
+			<div class="mhrow"><div class="mhlbl"><b>Audio depth</b><small>how much music grows movement (0&ndash;100)</small></div><input type="range" min="0" max="100" value="59" id="mhAD" oninput="gId('mhADV').innerText=this.value" onchange="MHset('aDepth',+this.value)"><span class="mhval" id="mhADV">59</span></div>
+			<div class="mhrow"><div class="mhlbl"><b>Smoothing</b><small>motion damping, higher = smoother (0&ndash;100)</small></div><input type="range" min="0" max="100" value="71" id="mhSm" oninput="gId('mhSmV').innerText=this.value" onchange="MHset('smooth',+this.value)"><span class="mhval" id="mhSmV">71</span></div>
+			<div class="mhrow"><div class="mhlbl"><b>Zoom reactive</b><small>beam zoom follows the audio</small></div><input type="checkbox" id="mhZR" onchange="MHset('zReact',this.checked)"></div>
+			<div class="mhrow"><div class="mhlbl"><b>Zoom manual</b><small>fixed beam when reactive is off (0&ndash;100)</small></div><input type="range" min="0" max="100" value="50" id="mhZM" oninput="gId('mhZMV').innerText=this.value" onchange="MHset('zMan',+this.value)"><span class="mhval" id="mhZMV">50</span></div>
+			<div class="mhrow"><div class="mhlbl"><b>Strobe on beat</b><small>flash the fixture strobe on beats</small></div><input type="checkbox" id="mhStr" onchange="MHset('strobe',this.checked?1:0)"></div>
+			<div class="mhrow"><div class="mhlbl"><b>Dimmer follows audio</b><small>off = full brightness</small></div><input type="checkbox" id="mhDim" onchange="MHset('dimmer',this.checked?1:0)"></div>
+		</div>
+	</div>
 	<div id="Segments" class="tabcontent">
 		<p class="labels hd" id="segLabel">Segments</p>
 		<div id="segcont">
@@ -329,8 +345,9 @@
 <div class="tab bot" id="bot">
 	<button class="tablinks" onclick="openTab(0)"><i class="icons">&#xe2b3;</i><p class="tab-label">Colors</p></button>
 	<button class="tablinks" onclick="openTab(1)"><i class="icons">&#xe23d;</i><p class="tab-label">Effects</p></button>
-	<button class="tablinks" onclick="openTab(2)"><i class="icons">&#xe34b;</i><p class="tab-label">Segments</p></button>
-	<button class="tablinks" onclick="openTab(3)"><i class="icons">&#xe04c;</i><p class="tab-label">Presets</p></button>
+	<button class="tablinks" onclick="openTab(2)"><i class="icons">&#xe2a2;</i><p class="tab-label">Mover</p></button>
+	<button class="tablinks" onclick="openTab(3)"><i class="icons">&#xe34b;</i><p class="tab-label">Segments</p></button>
+	<button class="tablinks" onclick="openTab(4)"><i class="icons">&#xe04c;</i><p class="tab-label">Presets</p></button>
 </div>
 
 <div id="connind"></div>
