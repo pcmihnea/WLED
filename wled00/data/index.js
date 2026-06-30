@@ -345,8 +345,9 @@ function openTab(tabI, force = false)
 	switch (tabI) {
 		case 0: window.location.hash = "Colors"; break;
 		case 1: window.location.hash = "Effects"; break;
-		case 2: window.location.hash = "Segments"; break;
-		case 3: window.location.hash = "Presets"; break;
+		case 2: window.location.hash = "MovingHead"; break;
+		case 3: window.location.hash = "Segments"; break;
+		case 4: window.location.hash = "Presets"; break;
 	}
 }
 
@@ -354,9 +355,25 @@ function handleLocationHash() {
 	switch (window.location.hash) {
 		case "#Colors": openTab(0); break;
 		case "#Effects": openTab(1); break;
-		case "#Segments": openTab(2); break;
-		case "#Presets": openTab(3); break;
+		case "#MovingHead": openTab(2); break;
+		case "#Segments": openTab(3); break;
+		case "#Presets": openTab(4); break;
 	}
+}
+
+// Moving Head group: send one param to the usermod via state JSON
+function MHset(k, v) { var o = {}; o[k] = v; requestJson({"MovingHead": o}); }
+// Moving Head group: reflect current state into the controls (called from readState)
+function MHapply(m) {
+	try {
+		if (!m) return;
+		// S: set slider/select value (+ optional value-readout span); C: set checkbox
+		var S = function(id, v, vid) { var e = gId(id); if (e != null && v != undefined) { e.value = v; if (vid) { var s = gId(vid); if (s) s.innerText = v; } } };
+		var C = function(id, v) { var e = gId(id); if (e != null && v != undefined) e.checked = !!v; };
+		S('mhSpeed', m.speed, 'mhSpeedV'); S('mhSize', m.size, 'mhSizeV'); S('mhPat', m.pattern);
+		S('mhSens', m.sens, 'mhSensV'); S('mhAD', m.aDepth, 'mhADV'); S('mhSm', m.smooth, 'mhSmV');
+		C('mhZR', m.zReact); S('mhZM', m.zMan, 'mhZMV'); C('mhStr', m.strobe); C('mhDim', m.dimmer);
+	} catch (e) {}
 }
 
 var timeout;
@@ -1468,6 +1485,7 @@ function readState(s,command=false)
 
 	isOn = s.on;
 	gId('sliderBri').value = s.bri;
+	MHapply(s.MovingHead);
 	nlA = s.nl.on;
 	nlDur = s.nl.dur;
 	nlTar = s.nl.tbri;
@@ -3103,7 +3121,7 @@ function unfocusSliders()
 }
 
 // sliding UI
-const _C = d.querySelector('.container'), N = 4;
+const _C = d.querySelector('.container'), N = 5;
 
 let iSlide = 0, x0 = null, scrollS = 0, locked = false;
 
@@ -3178,7 +3196,7 @@ function togglePcMode(fromB = false)
 	gId('buttonPcm').className = (pcMode) ? "active":"";
 	gId('bot').style.height = (pcMode && !cfg.comp.pcmbot) ? "0":"auto";
 	sCol('--bh', gId('bot').clientHeight + "px");
-	_C.style.width = (pcMode || simplifiedUI)?'100%':'400%';
+	_C.style.width = (pcMode || simplifiedUI)?'100%':'500%';
 }
 
 function mergeDeep(target, ...sources)

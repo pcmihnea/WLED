@@ -651,14 +651,16 @@ void serializeState(JsonObject root, bool forPreset, bool includeBri, bool segme
     root[F("bs")] = blendingStyle;
   }
 
+  // Include usermod state in BOTH the live API and saved presets, so per-preset usermod
+  // settings (e.g. movinghead motion params) persist. Stock WLED skips this for presets.
+  UsermodManager::addToJsonState(root);
+
   if (!forPreset) {
     if (errorFlag) {root[F("error")] = errorFlag; errorFlag = ERR_NONE;} //prevent error message to persist on screen
 
     root["ps"] = (currentPreset > 0) ? currentPreset : -1;
     root[F("pl")] = currentPlaylist;
     root[F("ledmap")] = currentLedmap;
-
-    UsermodManager::addToJsonState(root);
 
     JsonObject nl = root.createNestedObject("nl");
     nl["on"] = nightlightActive;
