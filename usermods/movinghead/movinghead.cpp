@@ -47,7 +47,8 @@ class MovingHead : public Usermod {
     uint16_t dmxAddr     = MH_DEFAULT_ADDR;   // DMX channel of the fixture's first channel (Pan)
     uint8_t  chMode      = 24;                // 16 / 24 / 32
     uint8_t  sourceSeg   = 0;                 // WLED segment whose pixels colour the rings
-    uint8_t  pattern     = 0;                 // motion path (0..10)
+    uint8_t  pattern     = 0;                 // motion path (0..18)
+    uint8_t  motionMode  = 0;                 // 0 Auto (continuous, audio speeds+grows) / 1 Beat (step per beat)
     uint8_t  speed       = 90;                // base motion speed
     uint8_t  size        = 200;              // base movement amplitude
     uint8_t  smoothing   = 180;              // motion low-pass (higher = smoother)
@@ -69,7 +70,7 @@ class MovingHead : public Usermod {
     float phase=0, panS=0, tiltS=0, accent=0, volEnv=0, prevE=0, rndx=0, rndy=0;
     uint8_t stepIdx=0;
     unsigned long lastFrame=0;
-    bool inited=false;
+    bool inited=false, beatPrev=false;
 
     // ---- DMX frame buffer (index 0 = start code, 1..512 = channel values) ----
     uint8_t _pkt[513] = {0};
@@ -89,6 +90,9 @@ class MovingHead : public Usermod {
     }
     inline void wr16(int8_t hi, int8_t lo, uint16_t v) { wr(hi, v >> 8); wr(lo, v & 0xFF); }
 
+    static inline float mhtri(float x) { const float P=3.14159265f; return (2.0f/P)*asinf(sinf(x)); }          // triangle -1..1
+    static inline float mhsaw(float x) { const float T=6.28318531f; float t=x/T; return 2.0f*(t-floorf(t+0.5f)); } // saw -1..1
+
     // normalized parametric path -> (nx,ny) in [-1,1]
     void path(uint8_t p, float th, float &nx, float &ny) {
       switch (p) {
@@ -100,8 +104,16 @@ class MovingHead : public Usermod {
         case 6:  nx = sinf(th);    ny = sinf(th);            break; // diagonal
         case 7:  { float r = fabsf(sinf(0.11f*th)); nx = r*cosf(th); ny = r*sinf(th); } break; // spiral
         case 8:  nx = sinf(th);    ny = 0.25f*sinf(2*th);    break; // sway
-        case 9:  nx = rndx;        ny = rndy;                break; // random-ease (energy-beat target)
-        case 10: { const float px[4]={-1,1,1,-1}, py[4]={-1,-1,1,1}; nx=px[stepIdx&3]; ny=py[stepIdx&3]; } break; // beat-step
+        case 9:  nx = rndx;        ny = rndy;                break; // random-ease (beat target)
+        case 10: { const float px[4]={-1,1,1,-1}, py[4]={-1,-1,1,1}; nx=px[stepIdx&3]; ny=py[stepIdx&3]; } break; // beat-step corners
+        case 11: nx = sinf(2*th);  ny = sinf(th);            break; // figure-8 vertical
+        case 12: { float r=cosf(2*th);    nx=r*cosf(th); ny=r*sinf(th); } break; // rose (4 petal)
+        case 13: { float r=cosf(1.5f*th); nx=r*cosf(th); ny=r*sinf(th); } break; // rose (3 petal)
+        case 14: nx = sinf(5*th);  ny = sinf(3*th);          break; // lissajous 5:3
+        case 15: nx = mhtri(th);   ny = mhtri(2*th);         break; // zigzag (triangle)
+        case 16: nx = mhsaw(th);   ny = 0.0f;                break; // saw sweep H (ramp + snap)
+        case 17: { float r=0.35f+0.65f*(0.5f+0.5f*sinf(0.25f*th)); nx=r*cosf(th); ny=r*sinf(th); } break; // breathe circle
+        case 18: { float r=fmodf(0.1f*th,1.0f); nx=r*cosf(th); ny=r*sinf(th); } break; // spiral out (expanding)
         default: nx = cosf(th);    ny = sinf(th);            break; // circle
       }
     }
@@ -155,25 +167,36 @@ class MovingHead : public Usermod {
       float dt = (now - lastFrame) / 1000.0f; if (dt > 0.1f) dt = 0.1f;
       lastFrame = now;
 
-      // ---- colour: read the source segment's pixels into 3 ring colours ----
+      // ---- colour: read the source segment's pixels into 3 ring colours (rings only) ----
       uint32_t rc[3]; bool haveColor = readRings(rc);
 
-      // ---- energy: size-weighted toward the dominant outer ring (1 : 5 : 12) ----
-      float e = 0.0f;
-      if (haveColor) e = (lum(rc[0])*1.0f + lum(rc[1])*5.0f + lum(rc[2])*12.0f) / 18.0f;
-      e = constrain(e * (sensitivity / 64.0f), 0.0f, 1.0f);
-      volEnv += (e - volEnv) * 0.25f;                      // smoothed energy envelope
-      bool beat = (e > prevE + 0.12f) && (e > 0.35f);      // rising-edge "beat" from the colour energy
-      prevE += (e - prevE) * 0.5f;                          // fast-tracking reference for edge detection
-      if (beat) { accent = 1.0f; rndx = (hw_random8()/127.5f)-1.0f; rndy = (hw_random8()/127.5f)-1.0f; stepIdx++; }
+      // ---- audio for MOTION: tap AudioReactive directly (volume envelope + real beat).
+      //      Colour still comes from the pixels above, but motion now reacts to the mic itself,
+      //      so a bright/steady colour effect no longer flat-lines the movement. ----
+      float vol = 0.0f; bool beat = false;
+      um_data_t* um;
+      if (UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE)) {
+        float volumeSmth = *(float*)um->u_data[0];          // 0..255 smoothed volume
+        beat = (*(uint8_t*)um->u_data[3]) != 0;             // samplePeak (real beat detection)
+        vol  = constrain(volumeSmth / 255.0f * (sensitivity / 64.0f), 0.0f, 1.0f);
+      }
+      volEnv += (vol - volEnv) * 0.25f;
+      bool beatEdge = beat && !beatPrev; beatPrev = beat;
+      if (beatEdge) { accent = 1.0f; rndx = (hw_random8()/127.5f)-1.0f; rndy = (hw_random8()/127.5f)-1.0f; stepIdx++; }
       accent *= powf(0.05f, dt);                            // frame-rate-independent decay
 
-      // ---- motion (parametric path; energy modulates amplitude + speed) ----
-      float spd = (speed / 90.0f) * (1.0f + (audioDepth/255.0f) * volEnv);
-      phase += spd * dt * 2.0f;
-      float nx, ny; path(pattern, phase, nx, ny);
-      float amp = (size/255.0f) * (1.0f + (audioDepth/255.0f) * volEnv) * (1.0f + 0.6f*accent);
+      // ---- motion: Auto (continuous; volume speeds+grows it, beats pop) or Beat (steps per beat) ----
+      float nx, ny, amp;
+      if (motionMode == 1) {                                // Beat: hold, advance one step on each beat
+        if (beatEdge) phase += 0.6f + (speed / 128.0f);     // Speed sets how far it jumps per beat
+        amp = size / 255.0f;                                // full positional throw; the beat step IS the reaction
+      } else {                                              // Auto: continuous parametric motion
+        float spd = (speed / 90.0f) * (1.0f + (audioDepth/255.0f) * volEnv);
+        phase += spd * dt * 2.0f;
+        amp = (size/255.0f) * (1.0f + (audioDepth/255.0f) * volEnv) * (1.0f + 0.6f*accent);
+      }
       amp = constrain(amp, 0.0f, 1.0f);
+      path(pattern, phase, nx, ny);
 
       float panT  = panCenter  + (panRange  * 0.5f) * nx * amp;
       float tiltT = tiltCenter + (tiltRange * 0.5f) * ny * amp;
@@ -229,7 +252,8 @@ class MovingHead : public Usermod {
     static inline uint8_t from100(int v)    { v = v<0?0:(v>100?100:v); return (uint8_t)((v*255 + 50) / 100); }
     void addToJsonState(JsonObject& root) override {
       JsonObject t = root.createNestedObject(F("MovingHead"));
-      t[F("speed")]=to100(speed); t[F("size")]=to100(size); t[F("pattern")]=pattern;
+      t[F("mode")]=motionMode; t[F("pattern")]=pattern;
+      t[F("speed")]=to100(speed); t[F("size")]=to100(size);
       t[F("sens")]=to100(sensitivity); t[F("aDepth")]=to100(audioDepth); t[F("smooth")]=to100(smoothing);
       t[F("zReact")]=zoomReact; t[F("zMan")]=to100(zoomManual); t[F("strobe")]=strobeMode; t[F("dimmer")]=dimmerMode;
     }
@@ -243,8 +267,9 @@ class MovingHead : public Usermod {
       if (getJsonValue(t[F("aDepth")], v)) audioDepth  = from100(v);
       if (getJsonValue(t[F("smooth")], v)) smoothing   = from100(v);
       if (getJsonValue(t[F("zMan")],   v)) zoomManual  = from100(v);
-      getJsonValue(t[F("pattern")], pattern);   // 0..10 index (passthrough)
-      getJsonValue(t[F("zReact")],  zoomReact); // toggles passthrough
+      getJsonValue(t[F("mode")],    motionMode); // 0 Auto / 1 Beat
+      getJsonValue(t[F("pattern")], pattern);    // 0..18 index (passthrough)
+      getJsonValue(t[F("zReact")],  zoomReact);  // toggles passthrough
       getJsonValue(t[F("strobe")],  strobeMode);
       getJsonValue(t[F("dimmer")],  dimmerMode);
     }
