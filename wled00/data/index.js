@@ -371,7 +371,7 @@ function MHapply(m) {
 		// S: set slider/select value (+ optional value-readout span); C: set checkbox
 		var S = function(id, v, vid) { var e = gId(id); if (e != null && v != undefined) { e.value = v; if (vid) { var s = gId(vid); if (s) s.innerText = v; } } };
 		var C = function(id, v) { var e = gId(id); if (e != null && v != undefined) e.checked = !!v; };
-		S('mhSpeed', m.speed, 'mhSpeedV'); S('mhSize', m.size, 'mhSizeV'); S('mhPat', m.pattern);
+		S('mhMode', m.mode); S('mhSpeed', m.speed, 'mhSpeedV'); S('mhSize', m.size, 'mhSizeV'); S('mhPat', m.pattern);
 		S('mhSens', m.sens, 'mhSensV'); S('mhAD', m.aDepth, 'mhADV'); S('mhSm', m.smooth, 'mhSmV');
 		C('mhZR', m.zReact); S('mhZM', m.zMan, 'mhZMV'); C('mhStr', m.strobe); C('mhDim', m.dimmer);
 	} catch (e) {}
