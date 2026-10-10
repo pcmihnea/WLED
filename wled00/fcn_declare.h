@@ -461,6 +461,7 @@ uint16_t beatsin16_t(uint16_t beats_per_minute, uint16_t lowest = 0, uint16_t hi
 uint8_t beatsin8_t(uint16_t beats_per_minute, uint8_t lowest = 0, uint8_t highest = 255, uint32_t timebase = 0, uint8_t phase_offset = 0);
 
 um_data_t* simulateSound(uint8_t simulationId);
+extern bool umStateForPreset;   // json.cpp: true while addToJsonState() runs for a preset save
 void enumerateLedmaps();
 [[gnu::hot]] uint8_t get_random_wheel_index(uint8_t pos);
 [[gnu::hot, gnu::pure]] float mapf(float x, float in_min, float in_max, float out_min, float out_max);

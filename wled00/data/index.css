@@ -316,11 +316,22 @@ button {
 .mhpanel { padding: 4px 10px 14px; }
 .mhhint { opacity: .6; font-size: 12px; margin: 4px 2px 10px; }
 .mhrow { display: flex; align-items: center; margin: 12px 0; gap: 10px; }
-.mhlbl { flex: 0 0 46%; display: flex; flex-direction: column; line-height: 1.15; }
+.mhlbl { flex: 0 0 46%; display: flex; flex-direction: column; line-height: 1.15; text-align: left; }
 .mhlbl small { opacity: .6; font-size: 11px; }
 .mhrow input[type=range] { flex: 1; margin: 0; min-width: 0; }
 .mhrow select { flex: 1; min-width: 0; }
 .mhval { flex: 0 0 28px; text-align: right; font-variant-numeric: tabular-nums; opacity: .8; }
+.mhsec { margin: 18px 0 4px; padding-bottom: 3px; border-bottom: 1px solid var(--c-4); font-weight: bold; text-transform: uppercase; font-size: 12px; letter-spacing: 1px; opacity: .75; cursor: pointer; user-select: none; }
+.mhsec::after { content: " \25BE"; }
+.mhsec.mhclosed::after { content: " \25B8"; }
+.mhstat { margin: 6px 2px 0; font-size: 14px; min-height: 18px; }
+.mhbtns { flex: 1; display: flex; gap: 8px; }
+.mhbtn { flex: 1; margin: 0; }
+#mhtap { flex: 2; font-weight: bold; padding: 10px 0; }
+.mhmeter { flex: 1; height: 10px; border-radius: 5px; background: var(--c-3); overflow: hidden; }
+.mhmeter > div { height: 100%; width: 0; transition: width .3s; }
+.mhinfo { flex: 0 0 52px; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+.mhflash { background: var(--c-f) !important; color: var(--c-1) !important; }
 
 .tab button:hover {
 	background-color: var(--c-tbh);

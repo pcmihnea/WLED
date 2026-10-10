@@ -45,7 +45,7 @@
   #define WLED_DISABLE_LOXONE       // uses 1.2kb
 #endif
 #ifndef WLED_DISABLE_WEBSOCKETS
-  #define WLED_DISABLE_WEBSOCKETS
+  #define WLED_ENABLE_WEBSOCKETS   // required by the web UI / app for live state updates (Mover tab, sliders, peek)
 #else
   #define WLED_ENABLE_JSONLIVE     // peek LED output via /json/live (WS binary peek is always enabled)
 #endif
@@ -63,7 +63,7 @@
 #ifndef WLED_WATCHDOG_TIMEOUT
   // 3 seconds should be enough to detect a lockup
   // define WLED_WATCHDOG_TIMEOUT=0 to disable watchdog, default
-  #define WLED_WATCHDOG_TIMEOUT 0
+  #define WLED_WATCHDOG_TIMEOUT 3
 #endif
 
 //optionally disable brownout detector on ESP32.

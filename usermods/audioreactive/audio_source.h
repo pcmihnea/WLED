@@ -144,13 +144,15 @@ class AudioSource {
     virtual AudioSourceType getType(void) {return(Type_I2SDigital);}               // default is "I2S digital source" - ADC type overrides this method
 
     /* Optional codec controls. No-ops for plain mics; codec sources (e.g. ES8311) override them.
-       setCodecGain applies an input-gain preset live over I2C; setCodecChannel selects the mono
-       I2S slot (takes effect on the next initialize()). Lets the UI tune a codec without a reflash. */
-    virtual void setCodecGain(uint8_t /*preset*/) {}
+       setCodecGain applies the codec input gain (dB) live over I2C; setCodecChannel selects the mono
+       I2S slot where a codec needs it. Lets the UI tune a codec without a reflash. */
+    virtual void setCodecGain(uint8_t /*gainDb*/) {}
     virtual void setCodecChannel(uint8_t /*ch*/) {}
     /* cheap (no-delay) presence probe for the hot-recovery poll. Non-codec sources can't be
        recovered by a re-init, so they return false (no auto-retry); codec sources override this. */
     virtual bool codecQuickCheck() { return false; }
+    /* true if codecQuickCheck() is meaningful for this source (enables the runtime "codec lost" watchdog) */
+    virtual bool hasCodecCheck() { return false; }
 
   protected:
     /* Post-process audio sample - currently on needed for I2SAdcSource*/
@@ -583,18 +585,21 @@ class ES8388Source : public I2SSource {
 */
 #include "es8311.h"
 
-// ES8311 input-gain presets, selectable live from the WLED GUI (no reflash). Each maps to the
-// codec's three gain stages {reg14 analog PGA, reg16 digital scale-up, reg17 ADC volume}:
-//   Low  = reduced analog PGA, max ADC headroom (loud / near music)
-//   Mid  = full analog PGA, no digital scale-up (neutral; pair with WLED AGC)   <-- default
-//   High = full PGA + ~24 dB digital (quieter rooms)
-//   Max  = full PGA + 42 dB digital (far-field / voice; matches M5 ESPHome)
-// reg17 stays 0xC8 (M5 value; the driver default 0xFF over-drives the ADC) for all presets.
-#ifndef ES8311_GAIN_DEFAULT
-  #define ES8311_GAIN_DEFAULT 1     // 0=Low 1=Mid 2=High 3=Max  (compile-time default; overridable in UI)
+// ES8311 microphone gain, selectable live from the WLED GUI (Usermods -> AudioReactive -> ES8311 mic gain).
+// One total gain in dB is split over the codec's two gain stages (Linux es8311 driver TLVs):
+//   reg 0x14 PGAGAIN : analog PGA,          0..30 dB in 3 dB steps  (bit4 LINSEL = analog MIC1P/N input)
+//   reg 0x16 ADC_SCALE: digital scale-up,   0..42 dB in 6 dB steps
+//   reg 0x17 ADC_VOLUME: fixed at 0xBF = 0 dB (-95.5 dB + 0.5 dB/step; the vendor default 0xFF is +32 dB)
+// Analog gain is used first (better noise), digital only above 30 dB.
+// Rough guide (Echo Base MEMS mic):  12 dB loud club / next to a speaker,  24 dB live room / party (default),
+//                                    36 dB quiet room / background music,  48+ dB far-field / voice.
+#ifndef ES8311_GAIN_DB_DEFAULT
+  #define ES8311_GAIN_DB_DEFAULT 24
 #endif
+// I2S slot: the codec is told to put its mono ADC on BOTH slots (reg 0x44 ADCDAT_SEL = "ADC + ADC"), so the
+// read slot does not matter - which also sidesteps the IDF 4.4 left/right swap bug documented above.
 #ifndef ES8311_I2S_CHANNEL
-  #define ES8311_I2S_CHANNEL I2S_CHANNEL_FMT_ONLY_LEFT    // ES8311 mono ADC (M5 uses left); duplicated on both slots anyway
+  #define ES8311_I2S_CHANNEL I2S_CHANNEL_FMT_ONLY_LEFT
 #endif
 // ---- robustness tunables (pessimistic; we're pioneering this codec with no fallback path) ----
 #ifndef ES8311_LDO_SETTLE_MS
@@ -620,9 +625,21 @@ class ES8311Source : public I2SSource {
   private:
     es8311_handle_t _es = nullptr;
     int _sr;
-    uint8_t _gainPreset = ES8311_GAIN_DEFAULT;
-    uint8_t _channel = (ES8311_I2S_CHANNEL == I2S_CHANNEL_FMT_ONLY_RIGHT) ? 1 : 0;
+    uint8_t _gainDb = ES8311_GAIN_DB_DEFAULT;
     bool _codecOk = false;                      // true only once the codec is detected + configured
+
+    // I2C is touched from two tasks (main loop: live gain changes; FFT task: init / watchdog probe).
+    // Wire locks single transactions only, so register read sequences are serialized here.
+    static SemaphoreHandle_t _i2cLock() {
+      static SemaphoreHandle_t m = nullptr;
+      if (m == nullptr) m = xSemaphoreCreateRecursiveMutex();
+      return m;
+    }
+    struct Lock {
+      bool ok;
+      Lock()  { ok = xSemaphoreTakeRecursive(_i2cLock(), pdMS_TO_TICKS(200)) == pdTRUE; }
+      ~Lock() { if (ok) xSemaphoreGiveRecursive(_i2cLock()); }
+    };
 
     // raw register read straight over Wire (independent of _es); true on a real I2C ACK
     static bool _rdReg(uint8_t reg, uint8_t &val) {
@@ -637,7 +654,9 @@ class ES8311Source : public I2SSource {
     bool _codecPresent() {
       for (uint8_t i = 0; i < ES8311_PROBE_RETRIES; i++) {
         uint8_t a = 0, b = 0;
-        if (_rdReg(0xFD, a) && _rdReg(0xFE, b) && a == 0x83 && b == 0x11) {
+        bool ok;
+        { Lock l; ok = l.ok && _rdReg(0xFD, a) && _rdReg(0xFE, b) && a == 0x83 && b == 0x11; }
+        if (ok) {
           DEBUGSR_PRINTF("[AR] ES8311 detected (ID %02X/%02X) on try %d\n", a, b, i + 1);
           return true;
         }
@@ -647,26 +666,32 @@ class ES8311Source : public I2SSource {
       return false;
     }
 
-    // input-gain preset -> {reg14 analog PGA, reg16 digital scale-up, reg17 ADC volume}
-    static void gainRegs(uint8_t p, uint8_t &r14, uint8_t &r16, uint8_t &r17) {
-      r17 = 0xC8;                              // ADC volume (M5 value) for all presets
-      switch (p) {
-        case 0:  r14 = 0x12; r16 = 0; break;   // Low  - reduced analog PGA, max headroom
-        case 2:  r14 = 0x1A; r16 = 4; break;   // High - full PGA + ~24 dB digital
-        case 3:  r14 = 0x1A; r16 = 7; break;   // Max  - full PGA + 42 dB digital (ESPHome)
-        default: r14 = 0x1A; r16 = 0; break;   // Mid  - full PGA, neutral
-      }
+    // total gain (dB) -> {reg14 analog PGA, reg16 digital scale, reg17 volume}
+    static void gainRegs(uint8_t db, uint8_t &r14, uint8_t &r16, uint8_t &r17) {
+      if (db > 72) db = 72;
+      uint8_t pga = (db > 30 ? 30 : db) / 3;           // 0..10  (3 dB steps)
+      uint8_t scale = db > 30 ? (db - 30 + 3) / 6 : 0; // 0..7   (6 dB steps, rounded)
+      if (scale > 7) scale = 7;
+      r14 = 0x10 | pga;                                // LINSEL: analog mic input, DMIC off
+      r16 = scale;                                     // ADC_INV off
+      r17 = 0xBF;                                      // ADC volume 0 dB
     }
-    // write the three gain regs and verify reg17 read-back; retry a few times. returns success.
-    bool applyGain(uint8_t p) {
+    // write the three gain regs and verify read-back; retry a few times. returns success.
+    bool applyGain(uint8_t db) {
       if (!_es) return false;                  // live I2C write only once the codec exists
-      uint8_t r14, r16, r17; gainRegs(p, r14, r16, r17);
+      uint8_t r14, r16, r17; gainRegs(db, r14, r16, r17);
       for (uint8_t attempt = 0; attempt < 3; attempt++) {
-        bool w = (es8311_write_reg(_es, 0x14, r14) == ESP_OK)
-               & (es8311_write_reg(_es, 0x16, r16) == ESP_OK)
-               & (es8311_write_reg(_es, 0x17, r17) == ESP_OK);
-        uint8_t rb = 0;
-        if (w && _rdReg(0x17, rb) && rb == r17) return true;   // verified
+        bool ok;
+        {
+          Lock l;
+          uint8_t rb14 = 0, rb16 = 0;
+          ok = l.ok
+             && (es8311_write_reg(_es, 0x14, r14) == ESP_OK)
+             && (es8311_write_reg(_es, 0x16, r16) == ESP_OK)
+             && (es8311_write_reg(_es, 0x17, r17) == ESP_OK)
+             && _rdReg(0x14, rb14) && _rdReg(0x16, rb16) && rb14 == r14 && (rb16 & 0x07) == r16;
+        }
+        if (ok) { DEBUGSR_PRINTF("[AR] ES8311 gain %u dB (PGA %u, scale %u)\n", db, r14 & 0x0F, r16); return true; }
         delay(ES8311_RETRY_MS);
       }
       DEBUGSR_PRINTLN(F("[AR] ES8311 gain write not verified"));
@@ -683,10 +708,15 @@ class ES8311Source : public I2SSource {
         return Wire.endTransmission() == 0;
       };
       for (uint8_t attempt = 0; attempt < 3; attempt++) {
-        bool ok = w(0x07, 0x00)   // IO_PP: high-impedance
-                & w(0x0D, 0xFF)   // pull-ups enabled
-                & w(0x03, 0x6F)   // direction (P0 output, M5 default)
-                & w(0x05, 0xFF);  // outputs high (enable / un-mute)
+        bool ok;
+        {
+          Lock l;
+          ok = l.ok
+             & w(0x07, 0x00)   // IO_PP: high-impedance
+             & w(0x0D, 0xFF)   // pull-ups enabled
+             & w(0x03, 0x6F)   // direction (P0 output, M5 default)
+             & w(0x05, 0xFF);  // outputs high (enable / un-mute)
+        }
         if (ok) return true;
         delay(ES8311_RETRY_MS);
       }
@@ -722,17 +752,22 @@ class ES8311Source : public I2SSource {
       if (!_codecPresent()) return;
 
       // 3) Create + init the codec, honoring I2C NAKs now, with retries.
+      //    No MCLK pin: the codec runs from SCLK = fs * 32 bit * 2 slots (1.4112 MHz @ 22.05 kHz, in the coeff table).
       const es8311_resolution_t res =
         (I2S_SAMPLE_RESOLUTION == I2S_BITS_PER_SAMPLE_16BIT) ? ES8311_RESOLUTION_16 : ES8311_RESOLUTION_32;
       // {mclk_inverted, sclk_inverted, mclk_from_mclk_pin, mclk_frequency, sample_frequency}
       es8311_clock_config_t clk = { false, false, false, 0, _sr };
       bool ok = false;
       for (uint8_t attempt = 0; attempt < ES8311_INIT_RETRIES && !ok; attempt++) {
+        Lock l;
+        if (!l.ok) { delay(ES8311_RETRY_MS); continue; }
         if (_es) { es8311_delete(_es); _es = nullptr; }
         _es = es8311_create((i2c_port_t)0, ES8311_ADDRRES_0);   // 0x18 (CE low)
         if (_es == nullptr)                                  { DEBUGSR_PRINTLN(F("AR: ES8311 create failed"));  delay(ES8311_RETRY_MS); continue; }
         if (es8311_init(_es, &clk, res, res) != ESP_OK)      { DEBUGSR_PRINTLN(F("AR: ES8311 init failed"));    delay(ES8311_RETRY_MS); continue; }
         if (es8311_microphone_config(_es, false) != ESP_OK)  { DEBUGSR_PRINTLN(F("AR: ES8311 mic cfg failed")); delay(ES8311_RETRY_MS); continue; }
+        // mono ADC on both I2S slots, no ADC->DAC loopback (reg 0x44: ADC2DAC_SEL=0, ADCDAT_SEL=000 "ADC + ADC")
+        if (es8311_write_reg(_es, 0x44, 0x00) != ESP_OK)     { DEBUGSR_PRINTLN(F("AR: ES8311 slot cfg failed")); delay(ES8311_RETRY_MS); continue; }
         ok = true;
       }
       if (!ok) {
@@ -741,7 +776,7 @@ class ES8311Source : public I2SSource {
         return;
       }
 
-      applyGain(_gainPreset);                 // reg14/16/17 from the GUI preset (verified read-back)
+      applyGain(_gainDb);                      // reg14/16/17 from the GUI setting (verified read-back)
 
       // 4) Configure I2S last. ESP is I2S master; Echo Base has no MCLK pin -> mclkPin = -1.
       // Free any I2S pins a previous partial attempt may have left allocated (deallocatePin no-ops if not
@@ -749,7 +784,7 @@ class ES8311Source : public I2SSource {
       PinManager::deallocatePin(i2swsPin, PinOwner::UM_Audioreactive);
       PinManager::deallocatePin(i2ssdPin, PinOwner::UM_Audioreactive);
       if (i2sckPin >= 0) PinManager::deallocatePin(i2sckPin, PinOwner::UM_Audioreactive);
-      _config.channel_format = _channel ? I2S_CHANNEL_FMT_ONLY_RIGHT : I2S_CHANNEL_FMT_ONLY_LEFT;
+      _config.channel_format = ES8311_I2S_CHANNEL;
       I2SSource::initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
       if (!_initialized) {                     // I2S driver install failed
         DEBUGSR_PRINTLN(F("AR: ES8311 I2S init failed - audio disabled"));
@@ -757,8 +792,8 @@ class ES8311Source : public I2SSource {
         return;
       }
 
-      delay(ES8311_CLK_SETTLE_MS);             // let the codec lock to the now-running SCLK/MCLK
-      applyGain(_gainPreset);                  // re-apply with clock running (some regs want MCLK)
+      delay(ES8311_CLK_SETTLE_MS);             // let the codec lock to the now-running SCLK
+      applyGain(_gainDb);                      // re-apply with clock running (some regs want MCLK)
       _codecOk = true;
       DEBUGSR_PRINTLN(F("AR: ES8311 ready"));
     }
@@ -769,11 +804,14 @@ class ES8311Source : public I2SSource {
       if (_es) { es8311_delete(_es); _es = nullptr; }
     }
 
-    // GUI knobs (driven from the AudioReactive usermod config)
-    void setCodecGain(uint8_t preset) override { _gainPreset = preset; applyGain(preset); }  // live over I2C if codec is up
-    void setCodecChannel(uint8_t ch) override  { _channel = ch ? 1 : 0; }                     // applied on next initialize()
-    // cheap single chip-ID read (no retries/delays) - safe to call often from the recovery poll
-    bool codecQuickCheck() override { uint8_t a = 0, b = 0; return _rdReg(0xFD, a) && _rdReg(0xFE, b) && a == 0x83 && b == 0x11; }
+    // GUI knob (driven from the AudioReactive usermod config): total mic gain in dB, applied live
+    void setCodecGain(uint8_t db) override { _gainDb = db; if (_codecOk) applyGain(db); }
+    // cheap single chip-ID read (no retries/delays) - safe to call often from the watchdog / recovery poll
+    bool codecQuickCheck() override {
+      Lock l; if (!l.ok) return true;          // bus busy (gain write in progress) -> don't count as a miss
+      uint8_t a = 0, b = 0; return _rdReg(0xFD, a) && _rdReg(0xFE, b) && a == 0x83 && b == 0x11;
+    }
+    bool hasCodecCheck() override { return true; }
 };
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 2, 0)

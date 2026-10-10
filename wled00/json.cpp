@@ -642,6 +642,8 @@ static void serializeSegment(JsonObject& root, const Segment& seg, byte id, bool
   root["bm"]  = seg.blendMode;
 }
 
+bool umStateForPreset = false;   // true while usermods serialize their state into a preset
+
 void serializeState(JsonObject root, bool forPreset, bool includeBri, bool segmentBounds, bool selectedSegmentsOnly)
 {
   if (includeBri) {
@@ -653,7 +655,10 @@ void serializeState(JsonObject root, bool forPreset, bool includeBri, bool segme
 
   // Include usermod state in BOTH the live API and saved presets, so per-preset usermod
   // settings (e.g. movinghead motion params) persist. Stock WLED skips this for presets.
+  // umStateForPreset lets a usermod leave out venue/device settings (mic gain, backlight...) from presets.
+  umStateForPreset = forPreset;
   UsermodManager::addToJsonState(root);
+  umStateForPreset = false;
 
   if (!forPreset) {
     if (errorFlag) {root[F("error")] = errorFlag; errorFlag = ERR_NONE;} //prevent error message to persist on screen

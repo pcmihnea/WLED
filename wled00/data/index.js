@@ -258,6 +258,7 @@ function onLoad()
 
 	if (localStorage.getItem('pcm') == "true" || (!/Mobi/.test(navigator.userAgent) && localStorage.getItem('pcm') == null)) togglePcMode(true);
 	applyCfg();
+	MHbuild();
 	if (cfg.comp.hdays) { //load custom holiday list
 		fetch(getURL("/holidays.json"), {	// may be loaded from external source
 			method: 'get'
@@ -362,19 +363,143 @@ function handleLocationHash() {
 	}
 }
 
-// Moving Head group: send one param to the usermod via state JSON
-function MHset(k, v) { var o = {}; o[k] = v; requestJson({"MovingHead": o}); }
-// Moving Head group: reflect current state into the controls (called from readState)
-function MHapply(m) {
+// ---- Moving Head ("Mover" tab) ----
+// controls are generated from this table. Keys: plain = MovingHead (usermods/movinghead MHLive),
+// "AR:" = AudioReactive, "D:" = Display. Sliders are 0..10, lists send their index (or the given value).
+const MHPAT = ["Circle","Figure-8","Lissajous 3:2","Lissajous 5:4","Sweep H","Sweep V","Diagonal","Spiral","Sway","Random (per beat)",
+	"Corners (per beat)","Figure-8 V","Rose 4","Rose 3","Lissajous 5:3","Zigzag","Saw sweep","Breathe","Spiral out","Square",
+	"Triangle","Star","Pendulum","Ballyhoo","Wave","Crowd scan","Bounce","Cross","Heart","Flower"];
+const MHUI = [
+	['h','Motion'],
+	['s','mode','Mode','Auto: continuous &middot; Beat: steps on the beat &middot; Sync: locked to the tempo &middot; Hold: fixed aim',['Auto','Beat','Sync','Hold']],
+	['s','pattern','Pattern','motion shape',MHPAT],
+	['b','Pattern','',[['Next pattern',"MHset('next',1)"]]],
+	['s','cycle','Change pattern','automatically, every N bars or on drops',['Off','Every 4 bars','Every 8 bars','Every 16 bars','Every 32 bars','On drops']],
+	['c','cycOrd','In order','change patterns in list order instead of randomly'],
+	['r','speed','Speed','Auto/Sync: rate &middot; Beat: step size'],
+	['r','size','Size','movement amplitude'],
+	['s','bpc','Beats per loop','Sync: one pattern loop every N beats',[[1,'1'],[2,'2'],[4,'4'],[8,'8'],[16,'16']]],
+	['s','stepDiv','Step every','Beat mode',['1/2 beat','beat','2 beats','4 beats']],
+	['s','dir','Direction','',['Forward','Reverse','Ping-pong (every 4 bars / loop)']],
+	['r','rotate','Rotate','turns the pattern, 0..180&deg;'],
+	['r','aspect','Shape','0 = flat (pan only), 5 = as drawn, 10 = tilt only'],
+	['r','smooth','Smoothing','higher = softer, slower moves'],
+	['r','motor','Motor speed','scales the fixture speed limits (10 = full)'],
+	['r','aimX','Aim pan','Hold: position &middot; other modes: shifts the centre (5 = centre)'],
+	['r','aimY','Aim tilt','as above, for tilt'],
+	['c','freeze','Freeze','stop moving, the beam keeps reacting'],
+	['h','Audio & tempo'],
+	['s','react','React to','what drives size, speed, dimmer and zoom',['Mix (volume + bass)','Bass','Mids','Highs','Volume']],
+	['r','sens','Sensitivity','audio gain into the show (5 = normal)'],
+	['r','depth','Audio depth','how much the music grows size and speed'],
+	['r','accent','Beat punch','size kick on every beat'],
+	['r','nod','Beat nod','tilt kick on every beat'],
+	['r','shake','Hit shake','pan flick on strong hits'],
+	['c','drop','Drop reaction','burst when the beat returns after a breakdown'],
+	['s','silence','On silence','after the silence time set in Usermods',['Keep moving','Slow drift','Park and dim']],
+	['s','tempo','Tempo','Audio uses the tap tempo only while it has no lock',['Audio (tap as fallback)','Tap only']],
+	['b','Tap tempo','tap 3+ times on the beat',[['TAP',"MHset('tap',1)",'mhtap'],['Clear',"MHset('tap',0)"]]],
+	['r','nudge','Timing nudge','5 = none, each step 40 ms earlier (higher) or later'],
+	['h','Beam'],
+	['s','dimmer','Dimmer','',['Full','Follows audio','Beat pulse','Breathe','Off','Chase (one head per beat)','Alternate (odd / even)']],
+	['r','dimFloor','Dimmer floor','minimum level for audio / pulse / breathe / chase'],
+	['s','strobe','Strobe','',['Off','Every beat','Strong hits','Every bar','Drops only']],
+	['r','strobeSpd','Strobe speed','between the Usermods strobe min and max values'],
+	['s','zoom','Zoom','',['Manual','Follows audio','Beat pulse','Inverse (narrow when loud)']],
+	['r','zMan','Zoom manual','0 = narrow, 10 = wide'],
+	['s','ringFx','Ring colours','from the source segment\'s effect',['As segment','Segment + beat flash','Chase on beat','Spectrum (bass/mid/high)','Solid','Pulse on beat','Rainbow (own colours)']],
+	['h','Several heads'],
+	['r','spread','Spread','0 = unison, 10 = phases evenly fanned (Hold: fan out)'],
+	['s','mirror','Mirror','every second head',['Off','Pan','Tilt','Pan + tilt']],
+	['h','Audio input'],
+	['c','AR:on','Audio reactive','microphone + beat detection'],
+	['s','AR:micDb','Mic gain','ES8311 codec; lower it if Info shows peak near 100%',[[0,'0 dB'],[6,'6 dB'],[12,'12 dB (loud club)'],[18,'18 dB'],[24,'24 dB (live room)'],[30,'30 dB'],[36,'36 dB (quiet room)'],[42,'42 dB'],[48,'48 dB (far / voice)'],[54,'54 dB'],[60,'60 dB']]],
+	['i','mhMic','Mic level','peak of the last 3 s; aim for about -20..-6 dBFS at show volume'],
+	['s','AR:agc','Auto gain','',['Off','Normal','Vivid','Lazy']],
+	['r','AR:sq10','Noise gate','higher = ignores more background noise'],
+	['r','AR:bsens','Beat sensitivity','higher = more onsets detected'],
+	['c','AR:peak','Onset peaks','peak effects + sound sync use the onset detector'],
+	['h','Device'],
+	['s','D:page','Screen page','',['Status','Audio','Mover']],
+	['r','D:bl','Screen backlight','']
+];
+const MHOBJ = {'AR':'AudioReactive','D':'Display'};
+function MHsplit(k) { let i = k.indexOf(':'); return i < 0 ? ['MovingHead', k] : [MHOBJ[k.slice(0,i)], k.slice(i+1)]; }
+function MHset(k, v) {
+	let [o, kk] = MHsplit(k), c = {}; c[o] = {}; c[o][kk] = v;
+	if (o == 'MovingHead') c[o].v = 2;
+	if (kk == 'tap' && v) { let b = gId('mhtap'); if (b) { b.classList.add('mhflash'); setTimeout(()=>b.classList.remove('mhflash'), 120); } }
+	requestJson(c);
+}
+function MHtoggle(n) {
+	let c = {}; try { c = JSON.parse(localStorage.getItem('mhCol') || '{}'); } catch (e) {}
+	c[n] = !c[n]; localStorage.setItem('mhCol', JSON.stringify(c));
+	let e = gId('mhs_'+n); if (e) e.style.display = c[n] ? 'none' : '';
+	let h = gId('mhh_'+n); if (h) h.classList.toggle('mhclosed', !!c[n]);
+}
+function MHbuild() {
+	let p = gId('mhPanel'); if (!p || p.dataset.b) return; p.dataset.b = 1;
+	let col = {}; try { col = JSON.parse(localStorage.getItem('mhCol') || '{}'); } catch (e) {}
+	let h = '<p class="mhstat" id="mhStat">&nbsp;</p><p class="mhhint">Live show controls, saved with presets. Audio input and Device are venue settings: not in presets, saved to the device setup 5 s after the last change. Fixture setup: Config &rarr; Usermods.</p>', open = false, sec = 0;
+	for (let e of MHUI) {
+		if (e[0]=='h') {
+			if (open) h += '</div>';
+			sec++; let cl = !!col[sec];
+			h += `<div class="mhsec${cl?' mhclosed':''}" id="mhh_${sec}" onclick="MHtoggle(${sec})">${e[1]}</div><div id="mhs_${sec}"${cl?' style="display:none"':''}>`;
+			open = true; continue;
+		}
+		if (e[0]=='i') {
+			h += `<div class="mhrow"><div class="mhlbl"><b>${e[2]}</b>${e[3]?'<small>'+e[3]+'</small>':''}</div><div class="mhmeter"><div id="${e[1]}Bar"></div></div><span class="mhinfo" id="${e[1]}">&ndash;</span></div>`;
+			continue;
+		}
+		if (e[0]=='b') {
+			let c = ''; for (let b of e[3]) c += `<button class="btn btn-xs mhbtn"${b[2]?' id="'+b[2]+'"':''} onclick="${b[1]}">${b[0]}</button>`;
+			h += `<div class="mhrow"><div class="mhlbl"><b>${e[1]}</b>${e[2]?'<small>'+e[2]+'</small>':''}</div><div class="mhbtns">${c}</div></div>`;
+			continue;
+		}
+		let [t,k,n,i] = e, c, id = k.replace(':','_');
+		if (t=='r') c = `<input type="range" min="0" max="10" step="1" value="5" data-k="${k}" oninput="gId('mhv_${id}').innerText=this.value" onchange="MHset('${k}',+this.value)"><span class="mhval" id="mhv_${id}">5</span>`;
+		else if (t=='c') c = `<input type="checkbox" data-k="${k}" onchange="MHset('${k}',this.checked${k.startsWith('AR:on')?'':'?1:0'})">`;
+		else { c = `<select data-k="${k}" onchange="MHset('${k}',+this.value)">`; e[4].forEach((o,j)=>{ let v = Array.isArray(o)?o[0]:j, l = Array.isArray(o)?o[1]:o; c += `<option value="${v}">${l}</option>`; }); c += '</select>'; }
+		h += `<div class="mhrow"><div class="mhlbl"><b>${n}</b>${i?'<small>'+i+'</small>':''}</div>${c}</div>`;
+	}
+	if (open) h += '</div>';
+	p.innerHTML = h;
+	setInterval(MHstatus, 2000);
+}
+// reflect the current state into the controls (called from readState with the whole state)
+function MHapply(s) {
 	try {
-		if (!m) return;
-		// S: set slider/select value (+ optional value-readout span); C: set checkbox
-		var S = function(id, v, vid) { var e = gId(id); if (e != null && v != undefined) { e.value = v; if (vid) { var s = gId(vid); if (s) s.innerText = v; } } };
-		var C = function(id, v) { var e = gId(id); if (e != null && v != undefined) e.checked = !!v; };
-		S('mhMode', m.mode); S('mhSpeed', m.speed, 'mhSpeedV'); S('mhSize', m.size, 'mhSizeV'); S('mhPat', m.pattern);
-		S('mhSens', m.sens, 'mhSensV'); S('mhAD', m.aDepth, 'mhADV'); S('mhSm', m.smooth, 'mhSmV');
-		C('mhZR', m.zReact); S('mhZM', m.zMan, 'mhZMV'); C('mhStr', m.strobe); C('mhDim', m.dimmer);
+		if (!s) return;
+		MHbuild();
+		for (let e of d.querySelectorAll('#mhPanel [data-k]')) {
+			let [o, kk] = MHsplit(e.dataset.k), m = s[o]; if (!m) continue;
+			let v = m[kk]; if (v === undefined) continue;
+			if (e.type == 'checkbox') e.checked = !!v;
+			else { e.value = v; let sp = gId('mhv_'+e.dataset.k.replace(':','_')); if (sp) sp.innerText = v; }
+		}
 	} catch (e) {}
+}
+// live status line (BPM, tempo source, current pattern) - polled only while the Mover tab is visible
+function MHstatus() {
+	if (d.hidden || !(pcMode || iSlide == 2)) return;
+	fetch(getURL('/json/info')).then(r => r.json()).then(i => {
+		let m = i.mh, e = gId('mhStat'); if (!m || !e) return;
+		let t = m.bpm ? `&#9835; <b>${m.bpm}</b> BPM (${m.src})` : (m.sil ? '&#9835; silence' : '&#9835; no tempo lock');
+		if (m.tap && m.src != 'tap') t += ` &middot; tap ${m.tap}`;
+		t += ` &middot; ${m.pat}`;
+		if (m.drop) t += ' &middot; <b>DROP</b>';
+		e.innerHTML = t;
+		// mic level meter (AudioReactive input peak / clipping)
+		let a = i.ar, mt = gId('mhMic'), mb = gId('mhMicBar');
+		if (mt && mb) {
+			if (!a) { mt.innerHTML = '&ndash;'; mb.style.width = '0'; return; }
+			let pct = Math.max(0, Math.min(100, (a.pk + 60) * 100 / 60));
+			let col = (a.clip || a.pk > -3) ? 'var(--c-r,#d33)' : (a.pk > -12 ? '#db3' : '#3b5');
+			mb.style.width = pct + '%'; mb.style.background = col;
+			mt.innerHTML = a.clip ? '<b style="color:#e33">CLIP</b>' : a.pk + ' dB';
+		}
+	}).catch(()=>{});
 }
 
 var timeout;
@@ -1486,7 +1611,7 @@ function readState(s,command=false)
 
 	isOn = s.on;
 	gId('sliderBri').value = s.bri;
-	MHapply(s.MovingHead);
+	MHapply(s);
 	nlA = s.nl.on;
 	nlDur = s.nl.dur;
 	nlTar = s.nl.tbri;
