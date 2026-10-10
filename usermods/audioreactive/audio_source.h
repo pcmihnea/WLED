@@ -576,7 +576,9 @@ class ES8388Source : public I2SSource {
 
 };
 
-/* ES8311 Codec  (e.g. M5 Atomic Echo Base / AtomS3R-AI)
+/* ES8311 Codec  (e.g. M5 Atomic Voice Base, formerly Atomic Echo Base, SKU A149 / AtomS3R-AI)
+   Voice Base: analog MEMS mic (MSM381A3729H9BPC), pseudo-differential: MIC1P via 1 uF to the mic, MIC1N via 1 uF
+   to GND (codec HPF removes the rest of the DC). NS4150B speaker amp, CTRL on expander P0.
    Mono audio codec configured over I2C, then streams its analog mic into I2S.
    On the Echo Base there is NO MCLK pin, so the codec derives its clock from
    BCLK/SCLK -- handled by es8311_init() with mclk_from_mclk_pin = false (which
@@ -590,7 +592,7 @@ class ES8388Source : public I2SSource {
 //   reg 0x14 PGAGAIN : analog PGA,          0..30 dB in 3 dB steps  (bit4 LINSEL = analog MIC1P/N input)
 //   reg 0x16 ADC_SCALE: digital scale-up,   0..42 dB in 6 dB steps
 //   reg 0x17 ADC_VOLUME: fixed at 0xBF = 0 dB (-95.5 dB + 0.5 dB/step; the vendor default 0xFF is +32 dB)
-// Analog gain is used first (better noise), digital only above 30 dB.
+// Analog gain is used first (better noise), 3 dB steps up to 30 dB; above that 6 dB digital steps + 3 dB on the volume.
 // Rough guide (Echo Base MEMS mic):  12 dB loud club / next to a speaker,  24 dB live room / party (default),
 //                                    36 dB quiet room / background music,  48+ dB far-field / voice.
 #ifndef ES8311_GAIN_DB_DEFAULT
@@ -670,11 +672,12 @@ class ES8311Source : public I2SSource {
     static void gainRegs(uint8_t db, uint8_t &r14, uint8_t &r16, uint8_t &r17) {
       if (db > 72) db = 72;
       uint8_t pga = (db > 30 ? 30 : db) / 3;           // 0..10  (3 dB steps)
-      uint8_t scale = db > 30 ? (db - 30 + 3) / 6 : 0; // 0..7   (6 dB steps, rounded)
-      if (scale > 7) scale = 7;
+      uint8_t extra = db > 30 ? db - 30 : 0;
+      uint8_t scale = extra / 6; if (scale > 7) scale = 7; // 0..7   (6 dB steps)
+      uint8_t rem = extra - scale * 6; if (rem > 5) rem = 5;
       r14 = 0x10 | pga;                                // LINSEL: analog mic input, DMIC off
       r16 = scale;                                     // ADC_INV off
-      r17 = 0xBF;                                      // ADC volume 0 dB
+      r17 = 0xBF + rem * 2;                            // ADC volume 0 dB (+ the 3 dB remainder, 0.5 dB/step)
     }
     // write the three gain regs and verify read-back; retry a few times. returns success.
     bool applyGain(uint8_t db) {
@@ -699,23 +702,30 @@ class ES8311Source : public I2SSource {
     }
 
     #ifdef ES8311_PI4IOE_ADDR
-    // Echo Base gates the codec / speaker-PA via a PI4IOE5V6408 I/O expander.
-    // Returns true only if every write is ACKed (expander present). Retries a few times.
+    // Atomic Voice Base (formerly Echo Base): PI4IOE5V6408 expander. Same register sequence as M5Stack's official
+    // Arduino library (M5Atomic-EchoBase, pi4ioe_init): direction 0x6F, P0 = NS4150B speaker amp CTRL (high = on).
+    // Mic-only use: P0 is driven low (amp in shutdown, quieter supply, less current); every other output stays
+    // high exactly as M5Stack runs it. Build with -D ES8311_KEEP_SPEAKER to leave the amp on.
+    static bool _pi4ioeWrite(uint8_t reg, uint8_t val) {
+      Wire.beginTransmission((uint8_t)ES8311_PI4IOE_ADDR);
+      Wire.write(reg); Wire.write(val);
+      return Wire.endTransmission() == 0;
+    }
     bool _pi4ioeInit() {
-      auto w = [](uint8_t reg, uint8_t val)->bool {
-        Wire.beginTransmission((uint8_t)ES8311_PI4IOE_ADDR);
-        Wire.write(reg); Wire.write(val);
-        return Wire.endTransmission() == 0;
-      };
+      #ifdef ES8311_KEEP_SPEAKER
+      const uint8_t outs = 0xFF;               // all high: codec + speaker amp on (M5Stack default)
+      #else
+      const uint8_t outs = 0xFE;               // P0 low: speaker amp off, the rest as M5Stack
+      #endif
       for (uint8_t attempt = 0; attempt < 3; attempt++) {
         bool ok;
         {
           Lock l;
           ok = l.ok
-             & w(0x07, 0x00)   // IO_PP: high-impedance
-             & w(0x0D, 0xFF)   // pull-ups enabled
-             & w(0x03, 0x6F)   // direction (P0 output, M5 default)
-             & w(0x05, 0xFF);  // outputs high (enable / un-mute)
+             & _pi4ioeWrite(0x07, 0x00)   // IO_PP: high-impedance
+             & _pi4ioeWrite(0x0D, 0xFF)   // pull-ups enabled
+             & _pi4ioeWrite(0x03, 0x6F)   // direction (P0 output = amp CTRL), as M5Stack
+             & _pi4ioeWrite(0x05, outs);  // outputs
         }
         if (ok) return true;
         delay(ES8311_RETRY_MS);
@@ -768,6 +778,15 @@ class ES8311Source : public I2SSource {
         if (es8311_microphone_config(_es, false) != ESP_OK)  { DEBUGSR_PRINTLN(F("AR: ES8311 mic cfg failed")); delay(ES8311_RETRY_MS); continue; }
         // mono ADC on both I2S slots, no ADC->DAC loopback (reg 0x44: ADC2DAC_SEL=0, ADCDAT_SEL=000 "ADC + ADC")
         if (es8311_write_reg(_es, 0x44, 0x00) != ESP_OK)     { DEBUGSR_PRINTLN(F("AR: ES8311 slot cfg failed")); delay(ES8311_RETRY_MS); continue; }
+        // codec-side ALC and ADC auto-mute (hardware noise gate) off: WLED's AGC + squelch do this job, and a
+        // codec gate silently zeroing quiet passages makes the usable gain window tiny (reg 0x18 bit7 ALC_EN, bit6 AUTOMUTE_EN)
+        if (es8311_write_reg(_es, 0x18, 0x00) != ESP_OK)     { DEBUGSR_PRINTLN(F("AR: ES8311 ALC cfg failed")); delay(ES8311_RETRY_MS); continue; }
+        #ifndef ES8311_KEEP_SPEAKER
+        // mic-only: power down the DAC (reg 0x12 bit1 PDN_DAC) and switch off the output driver (reg 0x13 bit4 HPSW)
+        if (es8311_write_reg(_es, 0x12, 0x02) != ESP_OK || es8311_write_reg(_es, 0x13, 0x00) != ESP_OK) {
+          DEBUGSR_PRINTLN(F("AR: ES8311 DAC off failed")); delay(ES8311_RETRY_MS); continue;
+        }
+        #endif
         ok = true;
       }
       if (!ok) {

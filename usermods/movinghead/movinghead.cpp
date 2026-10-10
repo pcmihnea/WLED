@@ -126,6 +126,12 @@ class MovingHead : public Usermod {
     Head hd[MH_MAX_FIX];
     unsigned long lastFrameUs = 0;
     float phase = 0.0f, beatPos = 0.0f, beatOffset = 0.0f, dirSign = 1.0f;
+    float loopBeats = 0.0f, loopOff = 0.0f;                                 // Sync: effective beats per loop + phase continuity
+    // per-pattern motion tables (built once): speed normalisation and peak axis speed per radian of phase
+    float patK[MH_NUM_PATTERNS], patMx[MH_NUM_PATTERNS], patMy[MH_NUM_PATTERNS];
+    // drop detection: kick activity (onset impulses, ~1.5 s) vs. the song's normal level (~20 s)
+    float kickAct = 0.0f, kickRef = 0.0f;
+    unsigned long breakStart = 0;
     bool  syncLocked = false;
     float volEnv = 0, bandEnv[3] = {0, 0, 0}, accentEnv = 0, nodEnv = 0, shakeEnv = 0, shakeSign = 1.0f;
     uint8_t  stepIdx = 0, prevMode = 255, curPattern = 0, prevPattern = 0, lastSetPattern = 255, clockSrc = 255;
@@ -220,6 +226,36 @@ class MovingHead : public Usermod {
         case 29: { float r=cosf(5*th); nx=r*cosf(th); ny=r*sinf(th); } break; // flower (rose 5)
         default: nx = cosf(th);    ny = sinf(th);            break; // circle
       }
+    }
+
+    // Measure every pattern once: mean path speed (circle = 1) and the peak |dx/dth|, |dy/dth|.
+    // Jumps (saw snap, spiral-out reset) are skipped - the speed limits handle those.
+    void buildPatternTables() {
+      Head h0; const int N = 1024; const float span = 4.0f * MH_TWO_PI, dth = span / N;
+      for (uint8_t p = 0; p < MH_NUM_PATTERNS; p++) {
+        if (p == 9 || p == 10) { patK[p] = 1.0f; patMx[p] = patMy[p] = 1.0f; continue; }   // per-beat targets
+        float px, py, x, y, sum = 0.0f, mx = 0.0f, my = 0.0f; int n = 0;
+        path(p, 0.0f, px, py, h0, 0);
+        for (int i = 1; i <= N; i++) {
+          path(p, i * dth, x, y, h0, 0);
+          float dx = fabsf(x - px), dy = fabsf(y - py);
+          px = x; py = y;
+          if (dx > 0.25f || dy > 0.25f) continue;
+          sum += sqrtf(dx * dx + dy * dy) / dth; mx = fmaxf(mx, dx / dth); my = fmaxf(my, dy / dth); n++;
+        }
+        float mean = n ? sum / n : 1.0f;
+        patK[p]  = 1.0f / fmaxf(mean, 0.1f);       // phase-rate scale so every pattern travels at the circle's beam speed
+        patMx[p] = fmaxf(mx, 0.01f); patMy[p] = fmaxf(my, 0.01f);
+      }
+    }
+    // highest phase rate (rad/s) at which pattern p stays within 85% of the pan/tilt speed limits
+    float govRate(uint8_t p, float amp, float ax, float ay, float rc, float rs, float motorMul) const {
+      float dxb = patMx[p] * fabsf(rc) + patMy[p] * fabsf(rs), dyb = patMx[p] * fabsf(rs) + patMy[p] * fabsf(rc);
+      float aPan = amp * ax * panRange * 0.5f, aTilt = amp * ay * tiltRange * 0.5f;     // deg per unit
+      float r = 1e9f;
+      if (maxPanSpd  && aPan  * dxb > 0.01f) r = fminf(r, 0.85f * maxPanSpd  * motorMul / (aPan  * dxb));
+      if (maxTiltSpd && aTilt * dyb > 0.01f) r = fminf(r, 0.85f * maxTiltSpd * motorMul / (aTilt * dyb));
+      return r;
     }
 
     // ---------------- channel map ----------------
@@ -402,6 +438,7 @@ class MovingHead : public Usermod {
   public:
     void setup() override {
       buildChMap();
+      buildPatternTables();
       um_data = new um_data_t;
       um_data->u_size = 16;
       um_data->u_type = new um_types_t[um_data->u_size];
@@ -515,12 +552,20 @@ class MovingHead : public Usermod {
       const bool silDrift = silent && live.silence == 1, silPark = silent && live.silence == 2;
       xSilent = silent;
 
-      // drop = strong hits return after >= 4 s of music without them (breakdown / build-up)
+      // drop = the kick returns after a real breakdown: kick activity (onset impulses, ~1.5 s) falls below 30% of
+      // the song's normal level (~20 s average, frozen during the break) for >= 4 bars (8 s without tempo) while
+      // music keeps playing, then a strong hit. At most one drop per 30 s.
       bool dropNow = false;
-      if (strongHit) {
-        if (wasBreak && !silent) { dropAt = now; dropNow = true; }
-        wasBreak = false; lastStrong = now;
-      } else if (au.ok && volEnv > 0.05f && now - lastStrong > 4000) wasBreak = true;
+      kickAct = kickAct * expf(-dt / 1.5f) + (onsetEdge ? au.onsetStr : 0.0f);
+      const bool sound = au.ok && !silent && volEnv > 0.03f;
+      if (!breakStart && sound) kickRef += (kickAct - kickRef) * (1.0f - expf(-dt / 20.0f));
+      if (breakStart) {
+        const unsigned long minBreak = locked ? (unsigned long)(16.0f * periodMs) : 8000UL;
+        if (sound && strongHit && now - breakStart >= minBreak && (!dropAt || now - dropAt > 30000)) { dropAt = now; dropNow = true; breakStart = 0; }
+        else if (!sound || kickAct > 0.6f * kickRef) breakStart = 0;           // kick back without a drop moment, or silence
+      } else if (sound && kickRef > 0.3f && kickAct < 0.3f * kickRef) breakStart = now | 1;
+      if (strongHit) lastStrong = now;
+      wasBreak = breakStart != 0;
       const unsigned long dropLen = locked ? (unsigned long)(8.0f * periodMs) : 4000UL;
       const bool dropOn    = dropAt && (now - dropAt) < dropLen;
       const bool dropFlash = dropAt && (now - dropAt) < 1200;
@@ -583,10 +628,23 @@ class MovingHead : public Usermod {
       uint8_t mode = live.mode;
       if (silDrift && mode == 1) mode = 0;                                     // no beats to step on: drift
       const bool frozen = live.freeze;
+      float amp = s10(live.size) * (1.0f + depth * drive) * (1.0f + 0.6f * accAmt * accentEnv);
+      if (live.drop && dropOn) amp *= 1.3f;
+      if (silDrift) amp *= 0.6f;
+      amp = clamp01(amp);
+      const float ax = live.aspect <= 5 ? 1.0f : (10 - live.aspect) * 0.2f;   // 0 = flat (pan only) .. 10 = tilt only
+      const float ay = live.aspect >= 5 ? 1.0f : live.aspect * 0.2f;
+      const float rotA = live.rotate * (3.14159265f / 10.0f), rc_ = cosf(rotA), rs_ = sinf(rotA);
+      const float xf = (xfStart && now - xfStart < MH_XFADE_MS && prevPattern != curPattern) ? ease((now - xfStart) / (float)MH_XFADE_MS) : 1.0f;
+      // speed governor: never ask for more than the fixture can follow (else it cuts the figure into small circles)
+      float gov = govRate(curPattern, amp, ax, ay, rc_, rs_, motorMul);
+      if (xf < 1.0f) gov = fminf(gov, govRate(prevPattern, amp, ax, ay, rc_, rs_, motorMul));
+      const float kPat = patK[curPattern];                                     // equal beam speed for every pattern
 
       bool step = false;
       if (mode == 0) {
-        if (!frozen) phase += dirSign * rate * dt * (1.0f + depth * drive) * (silDrift ? 0.25f : 1.0f);
+        float r = rate * kPat * (1.0f + depth * drive) * (silDrift ? 0.25f : 1.0f);
+        if (!frozen) phase += dirSign * fminf(r, gov) * dt;
         if (beatEdge) advanceStep();
       } else if (mode == 1) {
         static const float divK[4] = {2.0f, 1.0f, 0.5f, 0.25f};              // steps per beat: 1/2, 1, 2, 4 beats
@@ -603,13 +661,26 @@ class MovingHead : public Usermod {
         if (frozen) step = false;
         if (step) {
           advanceStep();
-          phase += dirSign * (0.3f + 0.25f * live.speed);                      // Speed = step size along the path
+          phase += dirSign * (0.3f + 0.25f * live.speed) * kPat;               // Speed = step size (same beam distance for every pattern)
           stepStart = now;
           float base = locked ? periodMs / divK[live.stepDiv] : 400.0f * divN[live.stepDiv];
           stepDur = (uint16_t)constrain(base * (0.2f + 0.06f * live.smooth), 40.0f, 4000.0f);
         }
       } else if (mode == 2) {
-        float bpc = (float)live.bpc;
+        // loop length: complex patterns loop over more beats (x2/x4.., so loops stay on bar lines), and more again
+        // if the path would still be faster than the fixture. Re-evaluated on bar lines; phase stays continuous.
+        const float pMs = (locked && periodMs > 0.0f) ? periodMs : 500.0f;
+        const float ampMax = clamp01(s10(live.size) * (1.0f + depth) * (1.0f + 0.6f * accAmt) * (live.drop ? 1.3f : 1.0f));
+        const float govMax = govRate(curPattern, ampMax, ax, ay, rc_, rs_, motorMul);
+        int k = (int)lroundf(log2f(1.0f / kPat)); k = constrain(k, 0, 3);
+        while (k < 5 && MH_TWO_PI * 1000.0f / (live.bpc * (float)(1 << k) * pMs) > govMax) k++;
+        const float wantLoop = live.bpc * (float)(1 << k);
+        if (loopBeats <= 0.0f) loopBeats = wantLoop;
+        else if (wantLoop != loopBeats && (barEdge || !locked || (prevPattern != curPattern && xf < 0.05f))) {
+          loopOff += beatPos / loopBeats - beatPos / wantLoop;                // keep the phase continuous
+          loopBeats = wantLoop;
+        }
+        float bpc = loopBeats;
         if (frozen) syncLocked = false;                                        // re-align smoothly after a freeze
         else if (locked && !silDrift) {
           float lead = lagMs + nudgeMs + smoothTime * 1000.0f;                 // fixture lag + nudge + filter delay
@@ -622,27 +693,21 @@ class MovingHead : public Usermod {
           beatPos += dt * 1000.0f / periodMs + err * (1.0f - expf(-dt / 0.15f));
         } else {
           syncLocked = false;
-          beatPos += dt * rate * bpc / MH_TWO_PI * (1.0f + depth * drive) * (silDrift ? 0.25f : 1.0f);
+          float r = rate * kPat * (1.0f + depth * drive) * (silDrift ? 0.25f : 1.0f);
+          beatPos += dt * fminf(r, gov) * bpc / MH_TWO_PI;
         }
-        float u = beatPos / bpc;                                               // pattern loops
+        float u = beatPos / bpc + loopOff;                                     // pattern loops
         if (live.dir == 1) u = -u;
-        else if (live.dir == 2) { float k = floorf(u), fr = u - k; u = ((int32_t)k & 1) ? 1.0f - fr : fr; }  // ping-pong per loop
+        else if (live.dir == 2) { float lp = floorf(u), fr = u - lp; u = ((int32_t)lp & 1) ? 1.0f - fr : fr; }  // ping-pong per loop
         phase = MH_TWO_PI * u;
         if (beatEdge) advanceStep();
       }
       if (phase > 1e5f || phase < -1e5f) phase = fmodf(phase, MH_TWO_PI * 40.0f);
-      if (beatPos > 1e5f) { beatPos -= 1e5f; beatOffset -= 1e5f; }
+      if (beatPos > 1e5f) { loopOff += 1e5f / loopBeats; beatPos -= 1e5f; beatOffset -= 1e5f; }
+      if (loopOff > 1e4f || loopOff < -1e4f) loopOff = fmodf(loopOff, 1.0f);
 
-      float amp = s10(live.size) * (1.0f + depth * drive) * (1.0f + 0.6f * accAmt * accentEnv);
-      if (live.drop && dropOn) amp *= 1.3f;
-      if (silDrift) amp *= 0.6f;
-      amp = clamp01(amp);
-      const float ax = live.aspect <= 5 ? 1.0f : (10 - live.aspect) * 0.2f;   // 0 = flat (pan only) .. 10 = tilt only
-      const float ay = live.aspect >= 5 ? 1.0f : live.aspect * 0.2f;
-      const float rotA = live.rotate * (3.14159265f / 10.0f), rc_ = cosf(rotA), rs_ = sinf(rotA);
       const float nodY   = nodEnv * 0.6f * s10(live.nod);                     // tilt kick on beats
       const float shakeX = shakeSign * shakeEnv * 0.25f * s10(live.shake);    // pan flick on strong hits
-      const float xf = (xfStart && now - xfStart < MH_XFADE_MS && prevPattern != curPattern) ? ease((now - xfStart) / (float)MH_XFADE_MS) : 1.0f;
 
       const float pMin = max(0.0f, panCenter - panRange * 0.5f),  pMax = min((float)panDeg,  panCenter + panRange * 0.5f);
       const float tMin = max(0.0f, tiltCenter - tiltRange * 0.5f), tMax = min((float)tiltDeg, tiltCenter + tiltRange * 0.5f);
@@ -665,7 +730,7 @@ class MovingHead : public Usermod {
       float zT;
       const float zr = (float)zoomWide - (float)zoomNarrow;
       switch (live.zoom) {
-        case 0:  zT = zoomNarrow + zr * s10(live.zMan); break;
+        case 0:  zT = zoomWide - zr * s10(live.zMan); break;                  // 0 = wide, 10 = narrow
         case 2:  zT = zoomNarrow + zr * accentEnv; break;
         case 3:  zT = zoomWide - zr * clamp01(drive); break;
         default: zT = zoomNarrow + zr * clamp01(drive + 0.25f * accentEnv); break;
