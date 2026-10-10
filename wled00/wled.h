@@ -7,7 +7,7 @@
  */
 
 // version code in format yymmddb (b = daily build)
-#define VERSION 260626
+#define VERSION 261010
 
 //uncomment this if you have a "my_config.h" file you'd like to use
 //#define WLED_USE_MY_CONFIG
@@ -33,19 +33,19 @@
 #define WLED_DISABLE_HUESYNC     // saves 4kb
 #define WLED_DISABLE_INFRARED    // saves 12kb, there is no pin left for this on ESP8266-01
 #ifndef WLED_DISABLE_MQTT
-  #define WLED_ENABLE_MQTT         // saves 12kb
+  #define WLED_DISABLE_MQTT         // saves 12kb
 #endif
 #ifndef WLED_DISABLE_ADALIGHT      // can be used to disable reading commands from serial RX pin (see issue #3128).
-  #define WLED_ENABLE_ADALIGHT     // disable saves 5Kb (uses GPIO3 (RX) for serial). Related serial protocols: Adalight/TPM2, Improv, Serial JSON, Continuous Serial Streaming
+  #define WLED_DISABLE_ADALIGHT     // disable saves 5Kb (uses GPIO3 (RX) for serial). Related serial protocols: Adalight/TPM2, Improv, Serial JSON, Continuous Serial Streaming
 #else
   #undef WLED_ENABLE_ADALIGHT      // disable has priority over enable
 #endif
 //#define WLED_ENABLE_DMX          // uses 3.5kb
 #ifndef WLED_DISABLE_LOXONE
-  #define WLED_ENABLE_LOXONE       // uses 1.2kb
+  #define WLED_DISABLE_LOXONE       // uses 1.2kb
 #endif
 #ifndef WLED_DISABLE_WEBSOCKETS
-  #define WLED_ENABLE_WEBSOCKETS
+  #define WLED_DISABLE_WEBSOCKETS
 #else
   #define WLED_ENABLE_JSONLIVE     // peek LED output via /json/live (WS binary peek is always enabled)
 #endif
