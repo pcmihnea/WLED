@@ -2020,7 +2020,7 @@ class AudioReactive : public Usermod {
             // input level or "silence"
             if (maxSample5sec > 1.0f) {
               float my_usage = 100.0f * (maxSample5sec / 255.0f);
-              snprintf_P(myStringBuffer, 15, PSTR(" - peak %3d%%"), int(my_usage));
+              snprintf_P(myStringBuffer, 15, PSTR(" - AGC %3d%%"), int(my_usage));       // level after AGC: ~90-100% is normal, not clipping
               infoArr.add(myStringBuffer);
             } else {
               infoArr.add(F(" - quiet"));
@@ -2173,7 +2173,7 @@ class AudioReactive : public Usermod {
         if (getJsonValue(usermod[F("bsens")], v)) { v = constrain(v, 0, 10) * 255 / 10; changed |= (v != beatSens); beatSens = v; beatTracker.sensitivity = beatSens / 255.0f; }
         if (getJsonValue(usermod[F("peak")], v))  { v = constrain(v, 0, 1); changed |= (v != peakMode); peakMode = v; }
         if (getJsonValue(usermod[F("micDb")], v)) {
-          v = constrain(v, 0, 60); v -= v % 6;
+          v = constrain(v, 0, 60); v -= v % 3;
           if (v != es8311GainDb) { es8311GainDb = v; changed = true; if (audioSource) audioSource->setCodecGain(es8311GainDb); }
         }
         if (changed) cfgDirtyAt = millis() | 1;   // (re)start the 5 s save timer
@@ -2322,7 +2322,7 @@ class AudioReactive : public Usermod {
       configComplete &= getJsonValue(top[FPSTR(_digitalmic)]["pin"][2], i2sckPin);
       configComplete &= getJsonValue(top[FPSTR(_digitalmic)]["pin"][3], mclkPin);
       configComplete &= getJsonValue(top[FPSTR(_digitalmic)][F("es8311dB")], es8311GainDb);
-      es8311GainDb = min((int)es8311GainDb, 60);
+      es8311GainDb = min((int)es8311GainDb, 60); es8311GainDb -= es8311GainDb % 3;
       if (audioSource) audioSource->setCodecGain(es8311GainDb);   // live codec tuning (no reboot)
 
       configComplete &= getJsonValue(top[FPSTR(_config)][F("squelch")], soundSquelch);
@@ -2391,8 +2391,8 @@ class AudioReactive : public Usermod {
 
       // ES8311 mic gain (only relevant when mic type = ES8311; applied live over I2C, no reboot)
       uiScript.print(F("dd=addDropdown(ux,'digitalmic:es8311dB');"));
-      uiScript.print(F("for(let g=0;g<=60;g+=6)addOption(dd,g+' dB'+(g==12?' (loud club)':g==24?' (live room - default)':g==36?' (quiet room)':g==48?' (far / voice)':''),g);"));
-      uiScript.print(F("addInfo(ux+':digitalmic:es8311dB',1,'ES8311 only - lower it if Info shows peak near 100%');"));
+      uiScript.print(F("for(let g=0;g<=60;g+=3)addOption(dd,g+' dB'+(g==12?' (loud club)':g==24?' (live room - default)':g==36?' (quiet room)':g==48?' (far / voice)':''),g);"));
+      uiScript.print(F("addInfo(ux+':digitalmic:es8311dB',1,'ES8311 only - set it with the Mover tab mic level meter (-30..-6 dBFS)');"));
 
       uiScript.print(F("dd=addDropdown(ux,'config:AGC');"));
       uiScript.print(F("addOption(dd,'Off',0);"));
