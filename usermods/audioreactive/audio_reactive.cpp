@@ -114,8 +114,14 @@ static bool limiterOn = false;                 // bool: enable / disable dynamic
 #else
 static bool limiterOn = true;
 #endif
-static uint16_t attackTime =  80;             // int: attack time in milliseconds. Default 0.08sec
-static uint16_t decayTime = 1400;             // int: decay time in milliseconds.  Default 1.40sec
+#ifndef SR_DYN_RISE
+  #define SR_DYN_RISE 80
+#endif
+#ifndef SR_DYN_FALL
+  #define SR_DYN_FALL 1400
+#endif
+static uint16_t attackTime = SR_DYN_RISE;     // int: attack time in milliseconds. Default 0.08sec
+static uint16_t decayTime  = SR_DYN_FALL;     // int: decay time in milliseconds.  Default 1.40sec
 
 // peak detection
 #ifdef ARDUINO_ARCH_ESP32
@@ -172,6 +178,19 @@ static FFTsampleType* windowFFT = nullptr;
 constexpr i2s_port_t I2S_PORT = I2S_NUM_0;       // I2S port to use (do not change !)
 constexpr int BLOCK_SIZE = 128;                  // I2S buffer size (samples)
 
+// onset detection + tempo / beat-phase tracking (runs in the FFT task, see beat_tracker.h)
+#include "beat_tracker.h"
+static ARBeatTracker beatTracker;
+#ifndef SR_PEAK_MODE
+  #define SR_PEAK_MODE 0                         // 0 = legacy level trigger, 1 = onset detector drives samplePeak
+#endif
+static uint8_t peakMode  = SR_PEAK_MODE;         // config value
+static uint8_t beatSens  = 128;                  // onset sensitivity 0..255 (config value)
+static uint8_t beatMinBpm = 70, beatMaxBpm = 180; // tempo search range (config values)
+static const uint8_t sqTable[11] = {0, 2, 4, 6, 8, 10, 13, 16, 20, 25, 32};  // squelch for the 0..10 live UI scale
+static float micPeakHold = 0.0f;                 // raw input peak (16-bit scale) with ~3 s hold - for the UI level meter
+static unsigned long lastClipMs = 0;             // last FFT batch with >= 3 samples at full scale
+
 // globals
 static uint8_t inputLevel = 128;              // UI slider value
 #ifndef SR_SQUELCH
@@ -185,7 +204,10 @@ static uint8_t inputLevel = 128;              // UI slider value
   static uint8_t sampleGain = SR_GAIN;               // sample gain (config value)
 #endif
 // user settable options for FFTResult scaling
-static uint8_t FFTScalingMode = 3;            // 0 none; 1 optimized logarithmic; 2 optimized linear; 3 optimized square root
+#ifndef SR_FREQ_SCALE
+  #define SR_FREQ_SCALE 3
+#endif
+static uint8_t FFTScalingMode = SR_FREQ_SCALE; // 0 none; 1 optimized logarithmic; 2 optimized linear; 3 optimized square root
 
 // 
 // AGC presets
@@ -353,9 +375,33 @@ void FFTcode(void * parameter)
   const TickType_t xFrequency = FFT_MIN_CYCLE * portTICK_PERIOD_MS;  
 
   TickType_t xLastWakeTime = xTaskGetTickCount();
+  beatTracker.begin(float(SAMPLE_RATE) / float(samplesFFT));   // one tracker frame per FFT batch (~43 fps)
   for(;;) {
     delay(1);           // DO NOT DELETE THIS LINE! It is needed to give the IDLE(0) task enough time and to keep the watchdog happy.
                         // taskYIELD(), yield(), vTaskDelay() and esp_task_wdt_feed() didn't seem to work.
+
+    // --- codec runtime watchdog: a codec that disappears while running (Echo Base unplugged, brown-out on
+    //     the base) leaves I2S clocking a floating data line -> pure noise that the effects / moving head would
+    //     happily react to. Probe the chip-ID every few seconds; after 2 misses in a row tear the source down
+    //     (same task as getSamples -> safe) so the hot-recovery path below can bring it back. ---
+    if (audioSource && audioSource->isInitialized() && audioSource->hasCodecCheck()) {
+      static unsigned long lastProbe = 0;
+      static uint8_t probeMisses = 0;
+      if (millis() - lastProbe > AR_CODEC_RECOVERY_MS) {
+        lastProbe = millis();
+        if (audioSource->codecQuickCheck()) probeMisses = 0;
+        else if (++probeMisses >= 2) {
+          DEBUGSR_PRINTLN(F("[AR] codec lost - suspending audio until it is back"));
+          probeMisses = 0;
+          audioSource->deinitialize();
+          audioSourceFailed = true;
+          micDataReal = 0.0f;
+          memset(fftCalc, 0, sizeof(fftCalc));
+          memset(fftResult, 0, sizeof(fftResult));
+          beatTracker.reset();
+        }
+      }
+    }
 
     // --- codec hot-recovery (runs in THIS task, the only one that touches i2s_read -> no cross-task
     //     I2S race / no kernel-panic risk). If a codec source exists but never initialized (boot fault
@@ -408,11 +454,18 @@ void FFTcode(void * parameter)
     if (useMicFilter) runMicFilter(samplesFFT, valFFT);
     // find highest sample in the batch
     FFTsampleType maxSample = 0;                         // max sample from FFT batch
+    FFTsampleType rawPeak = 0;                           // same, including the extremes (level meter / clip detection)
+    int clipCount = 0;
     for (int i=0; i < samplesFFT; i++) {
+      FFTsampleType a = FFTabs(valFFT[i]);
+      if (a > rawPeak) rawPeak = a;
+      if (a >= 32000) clipCount++;                       // at / near 16-bit full scale
 	    // pick our  our current mic sample - we take the max value from all samples that go into FFT
 	    if ((valFFT[i] <= (INT16_MAX - 1024)) && (valFFT[i] >= (INT16_MIN + 1024)))  //skip extreme values - normally these are artefacts
-        if (FFTabs(valFFT[i]) > maxSample) maxSample = FFTabs(valFFT[i]);
+        if (a > maxSample) maxSample = a;
     }
+    micPeakHold = fmaxf((float)rawPeak, micPeakHold * 0.985f);   // ~3 s peak hold at 43 batches/s
+    if (clipCount >= 3) lastClipMs = millis();
     // release highest sample to volume reactive effects early - not strictly necessary here - could also be done at the end of the function
     // early release allows the filters (getSample() and agcAvg()) to work with fresh values - we will have matching gain and noise gate values when we want to process the FFT results.
     micDataReal = maxSample;
@@ -588,6 +641,13 @@ void FFTcode(void * parameter)
       fftTime  = (fftTimeInMillis*3 + fftTime*7)/10; // smooth
     }
 #endif
+    // onset / tempo / beat tracking on the raw magnitude spectrum (gain-independent)
+#if !defined(UM_AUDIOREACTIVE_USE_INTEGER_FFT)
+    beatTracker.process(valFFT, 1.0f / 2048.0f, (fabsf(sampleAvg) > 0.25f), millis());
+#else
+    beatTracker.process(valFFT, 1.0f / 4.0f, (fabsf(sampleAvg) > 0.25f), millis());   // integer FFT is scaled down by 512
+#endif
+
     // run peak detection
     autoResetPeak();
     detectSamplePeak();
@@ -754,6 +814,17 @@ static void postProcessFFTResults(bool noiseGateOpen, int numberOfChannels) // p
 // peak detection is called from FFT task when vReal[] contains valid FFT results
 static void detectSamplePeak(void) {
   bool havePeak = false;
+  if (peakMode == 1) {
+    // onset mode: one peak per detected onset (kick/snare), instead of "loud for a while"
+    static uint32_t lastOnsets = 0;
+    if (beatTracker.onsetCount != lastOnsets) {
+      lastOnsets = beatTracker.onsetCount;
+      samplePeak    = true;
+      timeOfPeak    = millis();
+      udpSamplePeak = true;
+    }
+    return;
+  }
   // softhack007: this code continuously triggers while amplitude in the selected bin is above a certain threshold. So it does not detect peaks - it detects high activity in a frequency bin.
   // Poor man's beat detection by seeing if sample > Average + some value.
   // This goes through ALL of the 255 bins - but ignores stupid settings
@@ -823,8 +894,10 @@ class AudioReactive : public Usermod {
     #else
     int8_t mclkPin = MCLK_PIN;
     #endif
-    uint8_t es8311Gain = 1;    // ES8311 input-gain preset: 0=Low 1=Mid 2=High 3=Max (codec types only)
-    uint8_t es8311Channel = 0; // ES8311 mono I2S slot: 0=Left 1=Right
+    #ifndef ES8311_GAIN_DB_DEFAULT
+      #define ES8311_GAIN_DB_DEFAULT 24
+    #endif
+    uint8_t es8311GainDb = ES8311_GAIN_DB_DEFAULT;  // ES8311 mic gain in dB (0..60, 6 dB steps), applied live
 #endif
 
     // new "V2" audiosync struct - 44 Bytes
@@ -901,6 +974,7 @@ class AudioReactive : public Usermod {
     int receivedFormat = 0;            // last received UDP sound sync format - 0=none, 1=v1 (0.13.x), 2=v2 (0.14.x)
     float maxSample5sec = 0.0f;        // max sample (after AGC) in last 5 seconds 
     unsigned long sampleMaxTimer = 0;  // last time maxSample5sec was reset
+    unsigned long cfgDirtyAt = 0;      // venue tuning changed from the Mover tab -> save cfg.json 5 s later
     #define CYCLE_SAMPLEMAX 3500       // time window for merasuring
 
     // strings to reduce flash memory usage (used more than twice)
@@ -1158,7 +1232,7 @@ class AudioReactive : public Usermod {
       if ((sampleMax < sampleReal) && (sampleReal > 0.5f)) {
         sampleMax = sampleMax + 0.5f * (sampleReal - sampleMax);  // new peak - with some filtering
         // another simple way to detect samplePeak - cannot detect beats, but reacts on peak volume
-        if (((binNum < 12) || ((maxVol < 1))) && (millis() - timeOfPeak > 80) && (sampleAvg > 1)) {
+        if ((peakMode == 0) && ((binNum < 12) || ((maxVol < 1))) && (millis() - timeOfPeak > 80) && (sampleAvg > 1)) {
           samplePeak    = true;
           timeOfPeak    = millis();
           udpSamplePeak = true;
@@ -1384,7 +1458,7 @@ class AudioReactive : public Usermod {
         // usermod exchangeable data
         // we will assign all usermod exportable data here as pointers to original variables or arrays and allocate memory for pointers
         um_data = new um_data_t;
-        um_data->u_size = 8;
+        um_data->u_size = 15;
         um_data->u_type = new um_types_t[um_data->u_size];
         um_data->u_data = new void*[um_data->u_size];
         um_data->u_data[0] = &volumeSmth;      //*used (New)
@@ -1403,6 +1477,25 @@ class AudioReactive : public Usermod {
         um_data->u_type[6] = UMT_BYTE;
         um_data->u_data[7] = &binNum;          // assigned in effect function from UI element!!! (Puddlepeak, Ripplepeak, Waterfall)
         um_data->u_type[7] = UMT_BYTE;
+        // ---- beat tracker (this fork) - consumers must check u_size >= 15 ----
+#ifdef ARDUINO_ARCH_ESP32
+        um_data->u_data[8]  = &beatTracker.beatCount;     // uint32: increments on every beat (tempo-locked when confident)
+        um_data->u_type[8]  = UMT_UINT32;
+        um_data->u_data[9]  = &beatTracker.bpm;           // float: tempo, 0 = unknown
+        um_data->u_type[9]  = UMT_FLOAT;
+        um_data->u_data[10] = &beatTracker.confidence;    // float 0..1: trust in bpm / beat phase
+        um_data->u_type[10] = UMT_FLOAT;
+        um_data->u_data[11] = &beatTracker.lastBeatMs;    // uint32: millis() of the last beat
+        um_data->u_type[11] = UMT_UINT32;
+        um_data->u_data[12] = &beatTracker.onsetCount;    // uint32: increments on every onset
+        um_data->u_type[12] = UMT_UINT32;
+        um_data->u_data[13] = &beatTracker.onsetStrength; // float 0..1: strength of the last onset
+        um_data->u_type[13] = UMT_FLOAT;
+        um_data->u_data[14] = beatTracker.bands;          // float[3]: bass / mid / high, self-normalized 0..1
+        um_data->u_type[14] = UMT_FLOAT_ARR;
+#else
+        um_data->u_size = 8;                              // no local beat tracker on 8266
+#endif
       }
 
 
@@ -1479,8 +1572,7 @@ class AudioReactive : public Usermod {
           useMicFilter = false;
           delay(100);
           if (audioSource) {
-            audioSource->setCodecChannel(es8311Channel);   // select mono slot before I2S init
-            audioSource->setCodecGain(es8311Gain);          // stored now, applied once the codec is up in initialize()
+            audioSource->setCodecGain(es8311GainDb);        // stored now, applied once the codec is up in initialize()
             audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
             if (!audioSource->isInitialized()) {            // codec/Echo Base absent or init failed
               DEBUGSR_PRINTLN(F("AR: ES8311 not initialized; kept for FFT-task hot-recovery"));
@@ -1582,6 +1674,7 @@ class AudioReactive : public Usermod {
     void loop() override
     {
       static unsigned long lastUMRun = millis();
+      if (cfgDirtyAt && millis() - cfgDirtyAt >= 5000) { cfgDirtyAt = 0; configNeedsWrite = true; }   // venue tuning: standard WLED config save
 
       if (!enabled) {
         disableSoundProcessing = true;   // keep processing suspended (FFT task)
@@ -1654,6 +1747,7 @@ class AudioReactive : public Usermod {
 
         limitSampleDynamics();
       }  // if (!disableSoundProcessing)
+      else beatTracker.idle();              // no local analysis running -> no beats / zero confidence
 #endif
 
       autoResetPeak();          // auto-reset sample peak after strip minShowDelay
@@ -1721,6 +1815,7 @@ class AudioReactive : public Usermod {
 #endif
 
       fillAudioPalettes();
+
     }
 
 
@@ -1840,6 +1935,14 @@ class AudioReactive : public Usermod {
     void addToJsonInfo(JsonObject& root) override
     {
 #ifdef ARDUINO_ARCH_ESP32
+      // structured input level for the Mover tab (mic gain setting at the venue)
+      if (enabled && audioSource && audioSource->isInitialized() && !(audioSyncEnabled & 0x02)) {
+        JsonObject lvl = root.createNestedObject(F("ar"));
+        lvl[F("pk")]   = (int)lroundf(20.0f * log10f(fmaxf(micPeakHold, 1.0f) / 32768.0f));   // dBFS, peak over ~3 s
+        lvl[F("clip")] = lastClipMs && (millis() - lastClipMs < 5000);
+      }
+#endif
+#ifdef ARDUINO_ARCH_ESP32
       char myStringBuffer[16]; // buffer for snprintf() - not used yet on 8266
 #endif
       JsonObject user = root["u"];
@@ -1937,6 +2040,17 @@ class AudioReactive : public Usermod {
           infoArr.add(F("suspended"));
         }
 
+        // beat tracker
+        if (audioSource && (disableSoundProcessing == false) && !(audioSyncEnabled & 0x02)) {
+          infoArr = user.createNestedArray(F("Beat"));
+          if (beatTracker.bpm > 0.0f && beatTracker.confidence >= 0.3f) {
+            snprintf_P(myStringBuffer, 15, PSTR("%d BPM"), int(beatTracker.bpm + 0.5f));
+            infoArr.add(myStringBuffer);
+            snprintf_P(myStringBuffer, 15, PSTR(" (%d%%)"), int(beatTracker.confidence * 100.0f));
+            infoArr.add(myStringBuffer);
+          } else infoArr.add(F("searching..."));
+        }
+
         // AGC or manual Gain
         if ((soundAgc==0) && (disableSoundProcessing == false) && !(audioSyncEnabled & 0x02)) {
           infoArr = user.createNestedArray(F("Manual Gain"));
@@ -2002,7 +2116,26 @@ class AudioReactive : public Usermod {
         usermod = root.createNestedObject(FPSTR(_name));
       }
       usermod["on"] = enabled;
+#ifdef ARDUINO_ARCH_ESP32
+      if (umStateForPreset) return;               // venue settings below are not part of presets
+      // live input tuning (Mover tab "Audio input"), small integers for the UI
+      usermod[F("agc")]   = soundAgc;              // 0 off, 1 normal, 2 vivid, 3 lazy
+      usermod[F("sq10")]  = squelchTo10(soundSquelch);
+      usermod[F("bsens")] = (beatSens * 10 + 127) / 255;
+      usermod[F("micDb")] = es8311GainDb;
+      usermod[F("peak")]  = peakMode;
+      usermod[F("bpm")]   = (beatTracker.confidence >= 0.3f) ? (int)(beatTracker.bpm + 0.5f) : 0;
+#endif
     }
+
+#ifdef ARDUINO_ARCH_ESP32
+    // squelch on a 0..10 UI scale (non-linear: fine steps where it matters), see sqTable
+    static uint8_t squelchTo10(uint8_t v) {
+      uint8_t best = 0;
+      for (uint8_t i = 1; i < 11; i++) if (abs((int)sqTable[i] - v) < abs((int)sqTable[best] - v)) best = i;
+      return best;
+    }
+#endif
 
 
     /*
@@ -2015,8 +2148,12 @@ class AudioReactive : public Usermod {
       bool prevEnabled = enabled;
       JsonObject usermod = root[FPSTR(_name)];
       if (!usermod.isNull()) {
-        if (usermod[FPSTR(_enabled)].is<bool>()) {
-          enabled = usermod[FPSTR(_enabled)].as<bool>();
+        bool newEnabled = enabled;
+        bool haveEnabled = usermod[FPSTR(_enabled)].is<bool>() ? (newEnabled = usermod[FPSTR(_enabled)].as<bool>(), true)
+                         : usermod["on"].is<bool>()            ? (newEnabled = usermod["on"].as<bool>(), true)   // addToJsonState()/presets use "on"
+                         : false;
+        if (haveEnabled) {
+          enabled = newEnabled;
           if (prevEnabled != enabled) onUpdateBegin(!enabled);
           if (addPalettes) {
             // add/remove custom/audioreactive palettes
@@ -2028,6 +2165,18 @@ class AudioReactive : public Usermod {
         if (usermod[FPSTR(_inputLvl)].is<int>()) {
           inputLevel = min(255,max(0,usermod[FPSTR(_inputLvl)].as<int>()));
         }
+        // live venue tuning from the Mover tab; written to the usermod config (cfg.json, standard WLED
+        // save) 5 s after the last change, so a burst of slider moves gives a single flash write
+        int v; bool changed = false;
+        if (getJsonValue(usermod[F("agc")], v))   { v = constrain(v, 0, AGC_NUM_PRESETS); changed |= (v != soundAgc); soundAgc = v; }
+        if (getJsonValue(usermod[F("sq10")], v))  { v = sqTable[constrain(v, 0, 10)]; changed |= (v != soundSquelch); soundSquelch = v; }
+        if (getJsonValue(usermod[F("bsens")], v)) { v = constrain(v, 0, 10) * 255 / 10; changed |= (v != beatSens); beatSens = v; beatTracker.sensitivity = beatSens / 255.0f; }
+        if (getJsonValue(usermod[F("peak")], v))  { v = constrain(v, 0, 1); changed |= (v != peakMode); peakMode = v; }
+        if (getJsonValue(usermod[F("micDb")], v)) {
+          v = constrain(v, 0, 60); v -= v % 6;
+          if (v != es8311GainDb) { es8311GainDb = v; changed = true; if (audioSource) audioSource->setCodecGain(es8311GainDb); }
+        }
+        if (changed) cfgDirtyAt = millis() | 1;   // (re)start the 5 s save timer
 #endif
       }
     }
@@ -2093,8 +2242,7 @@ class AudioReactive : public Usermod {
       pinArray.add(i2swsPin);
       pinArray.add(i2sckPin);
       pinArray.add(mclkPin);
-      dmic[F("es8311gain")] = es8311Gain;     // ES8311 codec knobs (ignored by other mic types)
-      dmic[F("es8311chan")] = es8311Channel;
+      dmic[F("es8311dB")] = es8311GainDb;     // ES8311 mic gain (ignored by other mic types)
 
       JsonObject cfg = top.createNestedObject(FPSTR(_config));
       cfg[F("squelch")] = soundSquelch;
@@ -2103,6 +2251,12 @@ class AudioReactive : public Usermod {
 
       JsonObject freqScale = top.createNestedObject(FPSTR(_frequency));
       freqScale[F("scale")] = FFTScalingMode;
+
+      JsonObject beat = top.createNestedObject(F("beat"));
+      beat[F("peak")] = peakMode;
+      beat[F("sens")] = beatSens;
+      beat[F("minBPM")] = beatMinBpm;
+      beat[F("maxBPM")] = beatMaxBpm;
 #endif
 
       JsonObject dynLim = top.createNestedObject(FPSTR(_dynamics));
@@ -2167,15 +2321,26 @@ class AudioReactive : public Usermod {
       configComplete &= getJsonValue(top[FPSTR(_digitalmic)]["pin"][1], i2swsPin);
       configComplete &= getJsonValue(top[FPSTR(_digitalmic)]["pin"][2], i2sckPin);
       configComplete &= getJsonValue(top[FPSTR(_digitalmic)]["pin"][3], mclkPin);
-      configComplete &= getJsonValue(top[FPSTR(_digitalmic)][F("es8311gain")], es8311Gain);
-      configComplete &= getJsonValue(top[FPSTR(_digitalmic)][F("es8311chan")], es8311Channel);
-      if (audioSource) { audioSource->setCodecGain(es8311Gain); audioSource->setCodecChannel(es8311Channel); } // live codec tuning (no reboot)
+      configComplete &= getJsonValue(top[FPSTR(_digitalmic)][F("es8311dB")], es8311GainDb);
+      es8311GainDb = min((int)es8311GainDb, 60);
+      if (audioSource) audioSource->setCodecGain(es8311GainDb);   // live codec tuning (no reboot)
 
       configComplete &= getJsonValue(top[FPSTR(_config)][F("squelch")], soundSquelch);
       configComplete &= getJsonValue(top[FPSTR(_config)][F("gain")],    sampleGain);
       configComplete &= getJsonValue(top[FPSTR(_config)][F("AGC")],     soundAgc);
 
       configComplete &= getJsonValue(top[FPSTR(_frequency)][F("scale")], FFTScalingMode);
+
+      configComplete &= getJsonValue(top[F("beat")][F("peak")], peakMode);
+      configComplete &= getJsonValue(top[F("beat")][F("sens")], beatSens);
+      configComplete &= getJsonValue(top[F("beat")][F("minBPM")], beatMinBpm);
+      configComplete &= getJsonValue(top[F("beat")][F("maxBPM")], beatMaxBpm);
+      if (peakMode > 1) peakMode = 1;
+      beatMinBpm = constrain(beatMinBpm, 55, 200);
+      beatMaxBpm = constrain(beatMaxBpm, beatMinBpm + 20, 250);
+      beatTracker.sensitivity = beatSens / 255.0f;
+      beatTracker.minBpm = beatMinBpm;
+      beatTracker.maxBpm = beatMaxBpm;
 
       configComplete &= getJsonValue(top[FPSTR(_dynamics)][F("limiter")], limiterOn);
       configComplete &= getJsonValue(top[FPSTR(_dynamics)][F("rise")],  attackTime);
@@ -2224,15 +2389,10 @@ class AudioReactive : public Usermod {
       uiScript.print(SR_DMTYPE_NETWORK_ONLY);
       uiScript.print(F(");"));
 
-      // ES8311 codec knobs (only relevant when mic type = ES8311; applied live over I2C)
-      uiScript.print(F("dd=addDropdown(ux,'digitalmic:es8311gain');"));
-      uiScript.print(F("addOption(dd,'ES8311 gain: Low (loud/near music)',0);"));
-      uiScript.print(F("addOption(dd,'ES8311 gain: Mid (default)',1);"));
-      uiScript.print(F("addOption(dd,'ES8311 gain: High (+24dB)',2);"));
-      uiScript.print(F("addOption(dd,'ES8311 gain: Max (far-field/voice)',3);"));
-      uiScript.print(F("dd=addDropdown(ux,'digitalmic:es8311chan');"));
-      uiScript.print(F("addOption(dd,'ES8311 channel: Left',0);"));
-      uiScript.print(F("addOption(dd,'ES8311 channel: Right',1);"));
+      // ES8311 mic gain (only relevant when mic type = ES8311; applied live over I2C, no reboot)
+      uiScript.print(F("dd=addDropdown(ux,'digitalmic:es8311dB');"));
+      uiScript.print(F("for(let g=0;g<=60;g+=6)addOption(dd,g+' dB'+(g==12?' (loud club)':g==24?' (live room - default)':g==36?' (quiet room)':g==48?' (far / voice)':''),g);"));
+      uiScript.print(F("addInfo(ux+':digitalmic:es8311dB',1,'ES8311 only - lower it if Info shows peak near 100%');"));
 
       uiScript.print(F("dd=addDropdown(ux,'config:AGC');"));
       uiScript.print(F("addOption(dd,'Off',0);"));
@@ -2252,6 +2412,14 @@ class AudioReactive : public Usermod {
       uiScript.print(F("addOption(dd,'Linear (Amplitude)',2);"));
       uiScript.print(F("addOption(dd,'Square Root (Energy)',3);"));
       uiScript.print(F("addOption(dd,'Logarithmic (Loudness)',1);"));
+
+      uiScript.print(F("dd=addDropdown(ux,'beat:peak');"));
+      uiScript.print(F("addOption(dd,'Legacy (level trigger)',0);"));
+      uiScript.print(F("addOption(dd,'Onset detector',1);"));
+      uiScript.print(F("addInfo(ux+':beat:peak',1,'drives samplePeak for peak effects + sound sync');"));
+      uiScript.print(F("addInfo(ux+':beat:sens',1,'onset sensitivity 0-255 (higher = more onsets)');"));
+      uiScript.print(F("addInfo(ux+':beat:minBPM',1,'tempo search range');"));
+      uiScript.print(F("addInfo(ux+':beat:maxBPM',1,'BPM');"));
 #endif
 
       uiScript.print(F("dd=addDropdown(ux,'sync:mode');"));
