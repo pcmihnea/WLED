@@ -10,7 +10,8 @@
 //              Hold - fixed aim (pan/tilt sliders), beam + nod/shake still react
 //            30 patterns with rotation / aspect / direction (incl. ping-pong), crossfaded pattern changes
 //            (by hand, every N bars or on drops), drop detection, silence handling, beat nod + hit shake,
-//            freeze, timing nudge, multi-head spread / mirror / dimmer chase.
+//            freeze, timing nudge, section energy (verse / chorus from the real input level), multi-head
+//            spread / mirror / dimmer chase, box test (visits the corners of the safe motion box).
 //  OUTPUT  : critically-damped smoothing with per-axis speed limits, 16-bit pan/tilt,
 //            non-blocking hardware-timed DMX (esp_dmx), up to 8 heads, built-in UKing 16/24/32-ch
 //            profiles or a custom channel map + fixed channel values for any other fixture.
@@ -44,6 +45,11 @@
 #define MH_NUM_PATTERNS  30
 #define MH_TWO_PI        6.2831853f
 #define MH_XFADE_MS      1500              // pattern change crossfade
+// Every pattern repeats after 100 turns (periods 2pi, 4pi, 8pi, 20pi; spiral |sin(0.11 th)| after 22pi), so the
+// phase can wrap there without a visible jump - keeps float precision for shows of any length.
+#define MH_PHASE_LOOPS   100.0f
+#define MH_PHASE_WRAP    (MH_PHASE_LOOPS * MH_TWO_PI)
+#define MH_BEAT_WRAP     1024.0f           // Sync: beat position wraps here (same reason)
 
 static const char mhPatNames[MH_NUM_PATTERNS][12] PROGMEM = {
   "Circle", "Figure-8", "Lissa 3:2", "Lissa 5:4", "Sweep H", "Sweep V", "Diagonal", "Spiral",
@@ -56,7 +62,7 @@ static const char mhPatNames[MH_NUM_PATTERNS][12] PROGMEM = {
 struct MHLive {
   uint8_t mode = 0, pattern = 0, cycle = 0, cycOrd = 0, speed = 4, size = 8, bpc = 4, stepDiv = 1, smooth = 5;
   uint8_t aimX = 5, aimY = 5, aspect = 5, rotate = 0, dir = 0, freeze = 0, motor = 10;
-  uint8_t react = 0, sens = 5, depth = 6, accent = 5, nod = 0, shake = 0, drop = 1, silence = 1, tempo = 0, nudge = 5;
+  uint8_t react = 0, sens = 5, depth = 6, accent = 5, nod = 0, shake = 0, drop = 1, silence = 1, tempo = 0, nudge = 5, energy = 5;
   uint8_t dimmer = 1, dimFloor = 3, strobe = 0, strobeSpd = 10, zoom = 1, zMan = 5, ringFx = 0, spread = 0, mirror = 0;
 };
 struct MHKey { const char* k; uint8_t MHLive::* p; uint8_t lo, hi; };
@@ -71,7 +77,7 @@ static const MHKey mhKeys[] = {
   {"react", &MHLive::react, 0, 4},     {"sens", &MHLive::sens, 0, 10},      {"depth", &MHLive::depth, 0, 10},
   {"accent", &MHLive::accent, 0, 10},  {"nod", &MHLive::nod, 0, 10},        {"shake", &MHLive::shake, 0, 10},
   {"drop", &MHLive::drop, 0, 1},       {"silence", &MHLive::silence, 0, 2}, {"tempo", &MHLive::tempo, 0, 1},
-  {"nudge", &MHLive::nudge, 0, 10},
+  {"nudge", &MHLive::nudge, 0, 10},      {"energy", &MHLive::energy, 0, 10},
   {"dimmer", &MHLive::dimmer, 0, 6},   {"dimFloor", &MHLive::dimFloor, 0, 10}, {"strobe", &MHLive::strobe, 0, 4},
   {"strobeSpd", &MHLive::strobeSpd, 0, 10}, {"zoom", &MHLive::zoom, 0, 3},  {"zMan", &MHLive::zMan, 0, 10},
   {"ringFx", &MHLive::ringFx, 0, 6},   {"spread", &MHLive::spread, 0, 10},  {"mirror", &MHLive::mirror, 0, 3},
@@ -127,11 +133,17 @@ class MovingHead : public Usermod {
     unsigned long lastFrameUs = 0;
     float phase = 0.0f, beatPos = 0.0f, beatOffset = 0.0f, dirSign = 1.0f;
     float loopBeats = 0.0f, loopOff = 0.0f;                                 // Sync: effective beats per loop + phase continuity
+    uint32_t beatBase = 0;                                                   // Sync: beat count the tempo lock is measured from
     // per-pattern motion tables (built once): speed normalisation and peak axis speed per radian of phase
     float patK[MH_NUM_PATTERNS], patMx[MH_NUM_PATTERNS], patMy[MH_NUM_PATTERNS];
     // drop detection: kick activity (onset impulses, ~1.5 s) vs. the song's normal level (~20 s)
     float kickAct = 0.0f, kickRef = 0.0f;
     unsigned long breakStart = 0;
+    // section energy: input level (dBFS, before auto gain) vs. this song's own loudness range
+    float secFast = 0.0f, secHi = 0.0f, secLo = 0.0f, secTarget = 0.5f, secPos = 0.5f;
+    bool  secInit = false;
+    // box test (setup aid): centre + 4 corners of the safe motion box
+    volatile unsigned long boxStart = 0;
     bool  syncLocked = false;
     float volEnv = 0, bandEnv[3] = {0, 0, 0}, accentEnv = 0, nodEnv = 0, shakeEnv = 0, shakeSign = 1.0f;
     uint8_t  stepIdx = 0, prevMode = 255, curPattern = 0, prevPattern = 0, lastSetPattern = 255, clockSrc = 255;
@@ -155,6 +167,7 @@ class MovingHead : public Usermod {
     const char* xPatName = mhPatNames[0];
     bool     xDrop = false, xSilent = false;
     uint8_t  xSrc = 0, xDropFlash = 0, xBeatInBar = 255;                   // tempo source (0 audio, 1 tap), drop flash, beat 0..3 in the bar
+    uint8_t  xBox = 0, xEnergy = 255;                                        // box test point 1..6 (0 = off), section energy 0..100 (255 = learning)
 
     // ================= DMX =================
     uint8_t  _pkt[513] = {0};
@@ -212,7 +225,7 @@ class MovingHead : public Usermod {
         case 15: nx = mhtri(th);   ny = mhtri(2*th);         break; // zigzag
         case 16: nx = mhsaw(th);   ny = 0.0f;                break; // saw sweep
         case 17: { float r=0.35f+0.65f*(0.5f+0.5f*sinf(0.25f*th)); nx=r*cosf(th); ny=r*sinf(th); } break; // breathe
-        case 18: { float r=frac1(0.1f*th); nx=r*cosf(th); ny=r*sinf(th); } break; // spiral out
+        case 18: { float r=frac1(th/(2.0f*MH_TWO_PI)); nx=r*cosf(th); ny=r*sinf(th); } break; // spiral out (2 turns)
         case 19: { const float vx[4]={-1,1,1,-1}, vy[4]={-1,-1,1,1}; poly(vx,vy,4,th/MH_TWO_PI,nx,ny); } break; // square
         case 20: { const float vx[3]={0,0.95f,-0.95f}, vy[3]={1,-0.8f,-0.8f}; poly(vx,vy,3,th/MH_TWO_PI,nx,ny); } break; // triangle
         case 21: { float vx[5], vy[5]; for (int k=0;k<5;k++){ float a=1.5708f+k*2.0f*MH_TWO_PI/5.0f; vx[k]=cosf(a); vy[k]=sinf(a);} poly(vx,vy,5,th/MH_TWO_PI,nx,ny); } break; // star
@@ -328,8 +341,8 @@ class MovingHead : public Usermod {
     }
 
     struct Audio {
-      bool ok = false, tracker = false;
-      float vol = 0, bands[3] = {0, 0, 0}, bpm = 0, conf = 0, onsetStr = 0;
+      bool ok = false, tracker = false, haveLevel = false;
+      float vol = 0, bands[3] = {0, 0, 0}, bpm = 0, conf = 0, onsetStr = 0, levelDb = -90.0f;
       uint32_t beats = 0, onsets = 0, lastBeatMs = 0;
     };
     void readAudio(Audio &a) {
@@ -347,6 +360,7 @@ class MovingHead : public Usermod {
         a.onsetStr   = *(float*)um->u_data[13];
         float* b     = (float*)um->u_data[14];
         a.bands[0] = b[0]; a.bands[1] = b[1]; a.bands[2] = b[2];
+        if (um->u_size >= 16) { a.levelDb = *(float*)um->u_data[15]; a.haveLevel = true; }   // input level before auto gain
       } else {                                        // stock AR: samplePeak edges = beats + onsets
         bool pk = (*(uint8_t*)um->u_data[3]) != 0;
         if (pk && !peakPrev) legacyPeaks++;
@@ -440,7 +454,7 @@ class MovingHead : public Usermod {
       buildChMap();
       buildPatternTables();
       um_data = new um_data_t;
-      um_data->u_size = 16;
+      um_data->u_size = 18;
       um_data->u_type = new um_types_t[um_data->u_size];
       um_data->u_data = new void*[um_data->u_size];
       um_data->u_data[0]  = &xPan;       um_data->u_type[0]  = UMT_FLOAT;      // head 1 pan, deg
@@ -459,6 +473,8 @@ class MovingHead : public Usermod {
       um_data->u_data[13] = &xSrc;       um_data->u_type[13] = UMT_BYTE;       // 0 audio tempo, 1 tap tempo
       um_data->u_data[14] = &xDropFlash; um_data->u_type[14] = UMT_BYTE;       // 1 during the first 2 s of a drop
       um_data->u_data[15] = &xBeatInBar; um_data->u_type[15] = UMT_BYTE;       // 0..3, 255 = no tempo
+      um_data->u_data[16] = &xBox;       um_data->u_type[16] = UMT_BYTE;       // box test point 1..6, 0 = off
+      um_data->u_data[17] = &xEnergy;    um_data->u_type[17] = UMT_BYTE;       // section energy 0..100, 255 = learning
 
       curPattern = prevPattern = live.pattern; lastSetPattern = live.pattern; xPatName = mhPatNames[curPattern];
 
@@ -565,6 +581,27 @@ class MovingHead : public Usermod {
         else if (!sound || kickAct > 0.6f * kickRef) breakStart = 0;           // kick back without a drop moment, or silence
       } else if (sound && kickRef > 0.3f && kickAct < 0.3f * kickRef) breakStart = now | 1;
       if (strongHit) lastStrong = now;
+
+      // section energy: auto gain makes a quiet verse and a loud chorus look alike, so use the real input level
+      // (before auto gain): where is it inside this song's own range? Highest / lowest ~2 s level seen, both
+      // relaxing over ~1 min. A flat (compressed) song or < 2 dB range gives no effect. 0 = quietest .. 1 = loudest.
+      if (silent) secInit = false;                                             // new song after a pause: learn again
+      else if (au.haveLevel && sound) {
+        const float L = au.levelDb;
+        if (!secInit) { secFast = secHi = secLo = L; secInit = true; }
+        secFast += (L - secFast) * (1.0f - expf(-dt / 2.0f));
+        const float relax = 1.0f - expf(-dt / 60.0f);
+        if (secFast > secHi) secHi = secFast; else secHi += (secFast - secHi) * relax;
+        if (secFast < secLo) secLo = secFast; else secLo += (secFast - secLo) * relax;
+        const float range = secHi - secLo;
+        const float pos = range > 0.5f ? (secFast - secLo) / range : 0.5f;
+        secTarget = 0.5f + (pos - 0.5f) * clamp01((range - 2.0f) / 4.0f);
+      }
+      if (!secInit) secTarget = 0.5f;
+      secPos += (secTarget - secPos) * (1.0f - expf(-dt / 1.0f));
+      xEnergy = secInit ? (uint8_t)(secPos * 100.0f + 0.5f) : 255;
+      const float secAmt = s10(live.energy) * (secPos - 0.5f) * 2.0f;          // -1 (quiet part) .. +1 (loud part)
+      const float secRate = powf(2.0f, 0.8f * secAmt);                         // speed x0.57 .. x1.74
       wasBreak = breakStart != 0;
       const unsigned long dropLen = locked ? (unsigned long)(8.0f * periodMs) : 4000UL;
       const bool dropOn    = dropAt && (now - dropAt) < dropLen;
@@ -629,6 +666,7 @@ class MovingHead : public Usermod {
       if (silDrift && mode == 1) mode = 0;                                     // no beats to step on: drift
       const bool frozen = live.freeze;
       float amp = s10(live.size) * (1.0f + depth * drive) * (1.0f + 0.6f * accAmt * accentEnv);
+      amp *= 1.0f + 0.35f * secAmt;                                            // size x0.65 .. x1.35 with the section
       if (live.drop && dropOn) amp *= 1.3f;
       if (silDrift) amp *= 0.6f;
       amp = clamp01(amp);
@@ -643,7 +681,7 @@ class MovingHead : public Usermod {
 
       bool step = false;
       if (mode == 0) {
-        float r = rate * kPat * (1.0f + depth * drive) * (silDrift ? 0.25f : 1.0f);
+        float r = rate * kPat * secRate * (1.0f + depth * drive) * (silDrift ? 0.25f : 1.0f);
         if (!frozen) phase += dirSign * fminf(r, gov) * dt;
         if (beatEdge) advanceStep();
       } else if (mode == 1) {
@@ -661,7 +699,7 @@ class MovingHead : public Usermod {
         if (frozen) step = false;
         if (step) {
           advanceStep();
-          phase += dirSign * (0.3f + 0.25f * live.speed) * kPat;               // Speed = step size (same beam distance for every pattern)
+          phase += dirSign * (0.3f + 0.25f * live.speed) * kPat * sqrtf(secRate);   // Speed = step size (same beam distance for every pattern)
           stepStart = now;
           float base = locked ? periodMs / divK[live.stepDiv] : 400.0f * divN[live.stepDiv];
           stepDur = (uint16_t)constrain(base * (0.2f + 0.06f * live.smooth), 40.0f, 4000.0f);
@@ -670,7 +708,7 @@ class MovingHead : public Usermod {
         // loop length: complex patterns loop over more beats (x2/x4.., so loops stay on bar lines), and more again
         // if the path would still be faster than the fixture. Re-evaluated on bar lines; phase stays continuous.
         const float pMs = (locked && periodMs > 0.0f) ? periodMs : 500.0f;
-        const float ampMax = clamp01(s10(live.size) * (1.0f + depth) * (1.0f + 0.6f * accAmt) * (live.drop ? 1.3f : 1.0f));
+        const float ampMax = clamp01(s10(live.size) * (1.0f + depth) * (1.0f + 0.6f * accAmt) * (1.0f + 0.35f * s10(live.energy)) * (live.drop ? 1.3f : 1.0f));
         const float govMax = govRate(curPattern, ampMax, ax, ay, rc_, rs_, motorMul);
         int k = (int)lroundf(log2f(1.0f / kPat)); k = constrain(k, 0, 3);
         while (k < 5 && MH_TWO_PI * 1000.0f / (live.bpc * (float)(1 << k) * pMs) > govMax) k++;
@@ -686,25 +724,30 @@ class MovingHead : public Usermod {
           float lead = lagMs + nudgeMs + smoothTime * 1000.0f;                 // fixture lag + nudge + filter delay
           float fr = ((float)(int32_t)(now - au.lastBeatMs) + lead) / periodMs;
           fr = constrain(fr, -1.0f, 3.0f);
-          float raw = (float)au.beats + fr;
+          if (!syncLocked) beatBase = au.beats;                                // small numbers -> full float precision
+          float raw = (float)(int32_t)(au.beats - beatBase) + fr;
           if (!syncLocked) { beatOffset = roundf(beatPos - raw); syncLocked = true; }
           float err = raw + beatOffset - beatPos;
           if (fabsf(err) > 1.5f) { beatOffset -= roundf(err); err = raw + beatOffset - beatPos; }
           beatPos += dt * 1000.0f / periodMs + err * (1.0f - expf(-dt / 0.15f));
         } else {
           syncLocked = false;
-          float r = rate * kPat * (1.0f + depth * drive) * (silDrift ? 0.25f : 1.0f);
+          float r = rate * kPat * secRate * (1.0f + depth * drive) * (silDrift ? 0.25f : 1.0f);
           beatPos += dt * fminf(r, gov) * bpc / MH_TWO_PI;
         }
         float u = beatPos / bpc + loopOff;                                     // pattern loops
         if (live.dir == 1) u = -u;
         else if (live.dir == 2) { float lp = floorf(u), fr = u - lp; u = ((int32_t)lp & 1) ? 1.0f - fr : fr; }  // ping-pong per loop
-        phase = MH_TWO_PI * u;
+        phase = MH_TWO_PI * fmodf(u, MH_PHASE_LOOPS);
         if (beatEdge) advanceStep();
       }
-      if (phase > 1e5f || phase < -1e5f) phase = fmodf(phase, MH_TWO_PI * 40.0f);
-      if (beatPos > 1e5f) { loopOff += 1e5f / loopBeats; beatPos -= 1e5f; beatOffset -= 1e5f; }
-      if (loopOff > 1e4f || loopOff < -1e4f) loopOff = fmodf(loopOff, 1.0f);
+      // keep the running numbers small (float precision); all wraps are invisible, see MH_PHASE_LOOPS
+      if (phase > MH_PHASE_WRAP || phase < -MH_PHASE_WRAP) phase = fmodf(phase, MH_PHASE_WRAP);
+      if (beatPos > MH_BEAT_WRAP && loopBeats > 0.0f) {
+        beatPos -= MH_BEAT_WRAP; beatBase += (uint32_t)MH_BEAT_WRAP;          // error term unchanged
+        loopOff += MH_BEAT_WRAP / loopBeats;                                   // loop position unchanged
+      }
+      if (loopOff > MH_PHASE_LOOPS || loopOff < -MH_PHASE_LOOPS) loopOff = fmodf(loopOff, MH_PHASE_LOOPS);   // even: ping-pong parity kept
 
       const float nodY   = nodEnv * 0.6f * s10(live.nod);                     // tilt kick on beats
       const float shakeX = shakeSign * shakeEnv * 0.25f * s10(live.shake);    // pan flick on strong hits
@@ -714,6 +757,13 @@ class MovingHead : public Usermod {
       const float cPan  = panCenter  + (live.aimX - 5) * 0.2f * panRange  * 0.5f;   // aim shifts the centre
       const float cTilt = tiltCenter + (live.aimY - 5) * 0.2f * tiltRange * 0.5f;
       xLimits[0] = pMin; xLimits[1] = pMax; xLimits[2] = tMin; xLimits[3] = tMax;
+
+      // box test: centre, the 4 corners, centre - 2 s each, beam on and narrow, overrides mode / park / freeze
+      int8_t boxPt = -1;
+      { unsigned long b0 = boxStart;
+        if (b0) { unsigned long k = (now - b0) / 2000UL; if (k >= 6) boxStart = 0; else boxPt = (int8_t)k; } }
+      const bool boxOn = boxPt >= 0;
+      xBox = boxPt + 1;
 
       // ================= beam (shared by all heads; dimmer chase per head) =================
       const float floorLv = s10(live.dimFloor);
@@ -736,7 +786,8 @@ class MovingHead : public Usermod {
         default: zT = zoomNarrow + zr * clamp01(drive + 0.25f * accentEnv); break;
       }
       if (live.drop && dropOn && live.zoom != 0) zT = zoomWide;
-      const bool strobeOn = !off && (int32_t)(strobeUntil - now) > 0;
+      if (boxOn) zT = zoomNarrow;
+      const bool strobeOn = !off && !boxOn && (int32_t)(strobeUntil - now) > 0;
       const uint8_t strobeDmx = strobeMin + (uint8_t)(((int)strobeVal - strobeMin) * live.strobeSpd / 10);
 
       // ================= per head =================
@@ -750,7 +801,12 @@ class MovingHead : public Usermod {
         const bool mirY = (live.mirror == 2 || live.mirror == 3) && (f & 1);
         float panT, tiltT;
 
-        if (parked || mode == 3) {
+        if (boxOn) {
+          static const int8_t bxs[6] = {0, -1, 1, 1, -1, 0}, bys[6] = {0, 1, 1, -1, -1, 0};
+          panT  = bxs[boxPt] < 0 ? pMin : (bxs[boxPt] > 0 ? pMax : 0.5f * (pMin + pMax));
+          tiltT = bys[boxPt] < 0 ? tMin : (bys[boxPt] > 0 ? tMax : 0.5f * (tMin + tMax));
+          h.curX = h.curY = 0;
+        } else if (parked || mode == 3) {
           float hx = panCenter, hy = tiltCenter;                               // park = centre of the box
           if (!parked) {                                                       // Hold: aim = position in the box
             hx = pMin + (pMax - pMin) * s10(live.aimX);
@@ -794,9 +850,10 @@ class MovingHead : public Usermod {
         panT  = constrain(panT,  pMin, pMax);
         tiltT = constrain(tiltT, tMin, tMax);
         if (!h.init) { h.panS = panT; h.tiltS = tiltT; h.init = true; }
-        const float st = (mode == 1 && !parked) ? 0.03f : smoothTime;         // Beat: the easing shapes the move
-        h.panS  = smoothDamp(h.panS,  panT,  h.panV,  st, maxPanSpd  * motorMul, dt);
-        h.tiltS = smoothDamp(h.tiltS, tiltT, h.tiltV, st, maxTiltSpd * motorMul, dt);
+        const float st = boxOn ? 0.08f : ((mode == 1 && !parked) ? 0.03f : smoothTime);   // Beat: the easing shapes the move
+        const float mm = boxOn ? 1.0f : motorMul;                             // box test: full configured speed
+        h.panS  = smoothDamp(h.panS,  panT,  h.panV,  st, maxPanSpd  * mm, dt);
+        h.tiltS = smoothDamp(h.tiltS, tiltT, h.tiltV, st, maxTiltSpd * mm, dt);
         h.zoomS += (zT - h.zoomS) * (live.zoom == 0 ? 1.0f : (1.0f - expf(-dt / 0.15f)));   // zoom motor is slow
         xPos[2 * f] = h.panS; xPos[2 * f + 1] = h.tiltS;
 
@@ -805,7 +862,8 @@ class MovingHead : public Usermod {
         if (live.dimmer == 5) lvH = (nF > 1 ? (au.beats % nF) == f : (au.beats & 1)) ? 1.0f : floorLv;   // one head per beat
         if (live.dimmer == 6) lvH = ((au.beats + f) & 1) ? 1.0f : floorLv;                               // odd / even swap
         if (live.drop && dropFlash && live.dimmer != 4) lvH = 1.0f;
-        const uint8_t dim = (off || silPark) ? 0 : (uint8_t)(bri * clamp01(lvH));
+        uint8_t dim = (off || silPark) ? 0 : (uint8_t)(bri * clamp01(lvH));
+        if (boxOn) dim = bri ? bri : 128;                                      // box test: beam visible even with WLED off
 
         // ---- rings ----
         uint32_t rc[3];
@@ -838,6 +896,8 @@ class MovingHead : public Usermod {
             }
           } break;
         }
+
+        if (boxOn) rc[0] = rc[1] = rc[2] = RGBW32(160, 160, 160, 0);          // box test: plain white rings
 
         // ---- DMX for this head ----
         const uint16_t base = headAddr(f);
@@ -879,6 +939,7 @@ class MovingHead : public Usermod {
       if (t.isNull()) return;
       int v;
       if (getJsonValue(t["tap"], v)) { if (v) registerTap(millis()); else { tapPeriod = 0.0f; tapN = 0; } }   // 1 = tap, 0 = clear
+      if (getJsonValue(t["box"], v)) boxStart = v ? (millis() | 1) : 0;      // box test: 1 = run, 0 = stop
       if (getJsonValue(t["next"], v) && v) { nextPattern(millis()); live.pattern = curPattern; lastSetPattern = curPattern; }  // "next pattern" button
       readLive(t);
     }
@@ -894,6 +955,8 @@ class MovingHead : public Usermod {
       mh[F("sil")]  = xSilent;
       mh[F("heads")] = fixtures;
       mh[F("skip")] = _framesSkipped;
+      mh[F("en")]   = secInit ? (int)(secPos * 100.0f + 0.5f) : -1;        // section energy 0..100, -1 = learning / no level
+      mh[F("box")]  = xBox;
 
       JsonObject u = root["u"]; if (u.isNull()) u = root.createNestedObject("u");
       JsonArray a = u.createNestedArray(F("Moving Head"));

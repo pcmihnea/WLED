@@ -400,6 +400,7 @@ const MHUI = [
 	['s','tempo','Tempo','Audio uses the tap tempo only while it has no lock',['Audio (tap as fallback)','Tap only']],
 	['b','Tap tempo','tap 3+ times on the beat',[['TAP',"MHset('tap',1)",'mhtap'],['Clear',"MHset('tap',0)"]]],
 	['r','nudge','Timing nudge','5 = none, each step 40 ms earlier (higher) or later'],
+	['r','energy','Section energy','bigger, faster moves in the loud parts of a song (chorus), calmer in quiet ones (verse); 0 = off'],
 	['h','Beam'],
 	['s','dimmer','Dimmer','',['Full','Follows audio','Beat pulse','Breathe','Off','Chase (one head per beat)','Alternate (odd / even)']],
 	['r','dimFloor','Dimmer floor','minimum level for audio / pulse / breathe / chase'],
@@ -408,7 +409,7 @@ const MHUI = [
 	['s','zoom','Zoom','',['Manual','Follows audio','Beat pulse','Inverse (narrow when loud)']],
 	['r','zMan','Zoom manual','0 = wide, 10 = narrow'],
 	['s','ringFx','Ring colours','from the source segment\'s effect',['As segment','Segment + beat flash','Chase on beat','Spectrum (bass/mid/high)','Solid','Pulse on beat','Rainbow (own colours)']],
-	['h','Several heads'],
+	['h','Several heads','multi'],
 	['r','spread','Spread','0 = unison, 10 = phases evenly fanned (Hold: fan out)'],
 	['s','mirror','Mirror','every second head',['Off','Pan','Tilt','Pan + tilt']],
 	['h','Audio input'],
@@ -420,6 +421,7 @@ const MHUI = [
 	['r','AR:bsens','Beat sensitivity','higher = more onsets detected'],
 	['c','AR:peak','Onset peaks','peak effects + sound sync use the onset detector'],
 	['h','Device'],
+	['b','Box test','head visits the centre and the 4 corners of the safe motion box (Usermods: panC/panR, tiltC/tiltR), 2 s each',[['Run',"MHset('box',1)"],['Stop',"MHset('box',0)"]]],
 	['s','D:page','Screen page','',['Status','Audio','Mover']],
 	['r','D:bl','Screen backlight','']
 ];
@@ -443,9 +445,9 @@ function MHbuild() {
 	let h = '<p class="mhstat" id="mhStat">&nbsp;</p><p class="mhhint">Live show controls, saved with presets. Audio input and Device are venue settings: not in presets, saved to the device setup 5 s after the last change. Fixture setup: Config &rarr; Usermods.</p>', open = false, sec = 0;
 	for (let e of MHUI) {
 		if (e[0]=='h') {
-			if (open) h += '</div>';
+			if (open) h += '</div></div>';
 			sec++; let cl = !!col[sec];
-			h += `<div class="mhsec${cl?' mhclosed':''}" id="mhh_${sec}" onclick="MHtoggle(${sec})">${e[1]}</div><div id="mhs_${sec}"${cl?' style="display:none"':''}>`;
+			h += `<div${e[2]?' id="mhg_'+e[2]+'" style="display:none"':''}><div class="mhsec${cl?' mhclosed':''}" id="mhh_${sec}" onclick="MHtoggle(${sec})">${e[1]}</div><div id="mhs_${sec}"${cl?' style="display:none"':''}>`;
 			open = true; continue;
 		}
 		if (e[0]=='i') {
@@ -463,9 +465,9 @@ function MHbuild() {
 		else { c = `<select data-k="${k}" onchange="MHset('${k}',+this.value)">`; e[4].forEach((o,j)=>{ let v = Array.isArray(o)?o[0]:j, l = Array.isArray(o)?o[1]:o; c += `<option value="${v}">${l}</option>`; }); c += '</select>'; }
 		h += `<div class="mhrow"><div class="mhlbl"><b>${n}</b>${i?'<small>'+i+'</small>':''}</div>${c}</div>`;
 	}
-	if (open) h += '</div>';
+	if (open) h += '</div></div>';
 	p.innerHTML = h;
-	setInterval(MHstatus, 2000);
+	setInterval(MHstatus, 2000); MHstatus();
 }
 // reflect the current state into the controls (called from readState with the whole state)
 function MHapply(s) {
@@ -488,8 +490,11 @@ function MHstatus() {
 		let t = m.bpm ? `&#9835; <b>${m.bpm}</b> BPM (${m.src})` : (m.sil ? '&#9835; silence' : '&#9835; no tempo lock');
 		if (m.tap && m.src != 'tap') t += ` &middot; tap ${m.tap}`;
 		t += ` &middot; ${m.pat}`;
+		if (m.en >= 0) t += ` &middot; energy ${m.en}%`;
 		if (m.drop) t += ' &middot; <b>DROP</b>';
+		if (m.box) t += ` &middot; <b>BOX TEST ${m.box}/6</b>`;
 		e.innerHTML = t;
+		let g = gId('mhg_multi'); if (g) g.style.display = m.heads > 1 ? '' : 'none';	// multi-head controls only with 2+ heads
 		// mic level meter (AudioReactive input peak / clipping)
 		let a = i.ar, mt = gId('mhMic'), mb = gId('mhMicBar');
 		if (mt && mb) {
