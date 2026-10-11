@@ -2,7 +2,8 @@
 //   STATUS : mic / fps / wifi / uptime / brightness / power / heap / psram, effect + palette,
 //            live preview of the first two segments
 //   AUDIO  : 16-band spectrum, volume, bass/mid/high energy, beat flash, BPM + lock confidence
-//   MOVER  : moving-head pan/tilt XY plot with trail, ring colours, dimmer + zoom, mode/pattern/BPM
+//   MOVER  : moving-head pan/tilt XY plot with trail, ring colours, dimmer / zoom / section energy bars,
+//            mode/pattern/BPM, beat-in-bar dots, tempo source, drop flash, box test progress
 //
 // Rendering: one 128x128 RGB565 canvas in internal (DMA-capable) RAM, pushed with SPI DMA while the
 // main loop carries on (the SPI transaction is held open; only the display uses this bus). Falls back to
@@ -60,6 +61,10 @@ class Atoms3rDisplayUsermod : public Usermod {
 
     bool     displayOff = false, btnDown = false, longFired = false;
     unsigned long cfgDirtyAt = 0;      // backlight / page changed from the Mover tab -> save cfg.json 5 s later
+    // JSON state / settings arrive on the web server task: only record them here, the screen (SPI DMA + backlight
+    // I2C) is touched from loop() only
+    volatile int8_t reqPage = -1;
+    volatile bool   reqBl = false, reqWake = false, reqCfg = false;
     unsigned long lastFrame = 0, lastInteract = 0, btnT0 = 0;
     uint8_t  kBri=0, kMode=0, kPal=0, kSpeed=0, kInt=0;
 
@@ -117,9 +122,13 @@ class Atoms3rDisplayUsermod : public Usermod {
 
     void loop() override {
       if (cfgDirtyAt && millis() - cfgDirtyAt >= 5000) { cfgDirtyAt = 0; configNeedsWrite = true; }   // standard WLED config save
-      if (!enabled) return;
+      if (!enabled) {                                      // disabled in Usermods: blank once
+        if (initDone && !displayOff) { if (dmaHeld) display.waitDMA(); display.setBrightness(0); displayOff = true; }
+        return;
+      }
       if (!initDone) { if (!initTried) initDone = initDisplay(); return; }   // enabled at runtime
 
+      applyRequests();
       handleButton41();
 
       unsigned long now = millis();
@@ -149,6 +158,21 @@ class Atoms3rDisplayUsermod : public Usermod {
     }
 
   private:
+    // apply what readFromJsonState() / readFromConfig() asked for (main loop only)
+    void applyRequests() {
+      if (reqCfg) {
+        reqCfg = false;
+        if (dmaHeld) display.waitDMA();                    // no panel commands while a frame is on the bus
+        display.setRotation(rotation);
+        display.setBrightness(blByte());
+        displayOff = false; lastInteract = millis(); lastFrame = 0;
+      }
+      int8_t p = reqPage;
+      if (p >= 0) { reqPage = -1; page = p % NUM_PAGES; trailN = 0; lastFrame = 0; }
+      if (reqBl)   { reqBl = false; if (!displayOff) display.setBrightness(blByte()); }
+      if (reqWake) { reqWake = false; wake(); }
+    }
+
     // short press (on release) = power toggle, long press (while held) = next page
     void handleButton41() {
       bool down = (digitalRead(ATOMS3R_BTN_PIN) == LOW);
@@ -350,8 +374,10 @@ class Atoms3rDisplayUsermod : public Usermod {
       float bpm = *(float*)mh->u_data[8], acc = *(float*)mh->u_data[9];
       const char* pat = *(const char**)mh->u_data[10];
 
-      field(d, 2, 1, TFT_ORANGE, "%s", modeNames[mode < 4 ? mode : 0]);
-      field(d, 32, 1, BASECOL, "%s", pat ? pat : "");
+      uint8_t box = mh->u_size >= 18 ? *(uint8_t*)mh->u_data[16] : 0;
+      if (box) field(d, 2, 1, TFT_MAGENTA, "BOX %u/6", box);                 // box test running
+      else     field(d, 2, 1, TFT_ORANGE, "%s", modeNames[mode < 4 ? mode : 0]);
+      if (!box) field(d, 32, 1, BASECOL, "%s", pat ? pat : "");
 
       // XY box: pan (x) / tilt (y) within the configured limits
       const int bx = 2, by = 13, bwid = 98, bht = 80;
@@ -403,11 +429,16 @@ class Atoms3rDisplayUsermod : public Usermod {
         }
       }
 
-      // dimmer + zoom bars
+      // dimmer / zoom / section energy bars
       const int barTop = by, barH = bht;
-      int hd = dim * (barH - 2) / 255, hz = zoom * (barH - 2) / 255;
-      d->drawRect(104, barTop, 10, barH, DIM565); d->fillRect(105, barTop + barH - 1 - hd, 8, hd, TFT_YELLOW);
-      d->drawRect(116, barTop, 10, barH, DIM565); d->fillRect(117, barTop + barH - 1 - hz, 8, hz, TFT_CYAN);
+      uint8_t en = mh->u_size >= 18 ? *(uint8_t*)mh->u_data[17] : 255;
+      const int lvl[3] = { dim * (barH - 2) / 255, zoom * (barH - 2) / 255, en <= 100 ? en * (barH - 2) / 100 : 0 };
+      const uint16_t bc[3] = { TFT_YELLOW, TFT_CYAN, TFT_MAGENTA };
+      for (int i = 0; i < 3; i++) {
+        const int x = 103 + i * 8;
+        d->drawRect(x, barTop, 7, barH, DIM565);
+        if (lvl[i] > 0) d->fillRect(x + 1, barTop + barH - 1 - lvl[i], 5, lvl[i], bc[i]);
+      }
 
       // ring colours (centre / mid / outer) + pan/tilt readout + tempo
       const int ry = H - 16;
@@ -419,7 +450,7 @@ class Atoms3rDisplayUsermod : public Usermod {
       if (locked) field(d, 60, ry + 8, TFT_GREEN, "%d BPM", (int)(bpm + 0.5f));
       else        field(d, 60, ry + 8, DIM565 | 0x4208, "free");
       d->setTextColor(DIM565 | 0x4208); d->setTextDatum(TC_DATUM);
-      d->drawString("D", 109, by + bht + 1); d->drawString("Z", 121, by + bht + 1);
+      d->drawString("D", 106, by + bht + 1); d->drawString("Z", 114, by + bht + 1); d->drawString("E", 122, by + bht + 1);
     }
 
   public:
@@ -437,13 +468,14 @@ class Atoms3rDisplayUsermod : public Usermod {
       if (t.isNull()) return;
       int v;
       if (getJsonValue(t[F("page")], v)) {
-        page = constrain(v, 0, NUM_PAGES - 1); trailN = 0; lastFrame = 0; wake();
-        if (page != startPage) { startPage = page; cfgDirtyAt = millis() | 1; }
+        v = constrain(v, 0, NUM_PAGES - 1);
+        reqPage = v; reqWake = true;
+        if (v != startPage) { startPage = v; cfgDirtyAt = millis() | 1; }
       }
       if (getJsonValue(t[F("bl")], v)) {
         v = constrain(v, 0, 10) * 10;
-        if (v != backlight) { backlight = v; if (initDone && !displayOff) display.setBrightness(blByte()); cfgDirtyAt = millis() | 1; }
-        wake();
+        if (v != backlight) { backlight = v; reqBl = true; cfgDirtyAt = millis() | 1; }
+        reqWake = true;
       }
     }
 
@@ -472,11 +504,7 @@ class Atoms3rDisplayUsermod : public Usermod {
       ok &= getJsonValue(t[F("page")],startPage,0);
       rotation &= 3; backlight = min(backlight, (uint8_t)100); startPage %= NUM_PAGES;
       if (initDone) {
-        display.setRotation(rotation);
-        display.setBrightness(enabled ? blByte() : 0);
-        displayOff = !enabled;
-        lastInteract = millis();
-        if (enabled && !wasEnabled) page = startPage;
+        if (enabled) { reqCfg = true; if (!wasEnabled) reqPage = startPage; }   // applied by loop() (disable: loop() blanks it)
       } else if (enabled && !wasEnabled) initTried = false;   // allow a (re)try from loop()
       return ok;
     }

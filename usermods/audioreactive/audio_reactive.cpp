@@ -190,6 +190,8 @@ static uint8_t beatMinBpm = 70, beatMaxBpm = 180; // tempo search range (config 
 static const uint8_t sqTable[11] = {0, 2, 4, 6, 8, 10, 13, 16, 20, 25, 32};  // squelch for the 0..10 live UI scale
 static float micPeakHold = 0.0f;                 // raw input peak (16-bit scale) with ~3 s hold - for the UI level meter
 static unsigned long lastClipMs = 0;             // last FFT batch with >= 3 samples at full scale
+static float micMeanSq = 0.0f;                    // raw input mean square, ~0.5 s average
+static float micLevelDb = -90.0f;                 // raw input RMS in dBFS (before auto gain) - real loudness for consumers
 
 // globals
 static uint8_t inputLevel = 128;              // UI slider value
@@ -456,8 +458,10 @@ void FFTcode(void * parameter)
     FFTsampleType maxSample = 0;                         // max sample from FFT batch
     FFTsampleType rawPeak = 0;                           // same, including the extremes (level meter / clip detection)
     int clipCount = 0;
+    float sumSq = 0.0f;
     for (int i=0; i < samplesFFT; i++) {
       FFTsampleType a = FFTabs(valFFT[i]);
+      sumSq += (float)a * (float)a;
       if (a > rawPeak) rawPeak = a;
       if (a >= 32000) clipCount++;                       // at / near 16-bit full scale
 	    // pick our  our current mic sample - we take the max value from all samples that go into FFT
@@ -466,6 +470,8 @@ void FFTcode(void * parameter)
     }
     micPeakHold = fmaxf((float)rawPeak, micPeakHold * 0.985f);   // ~3 s peak hold at 43 batches/s
     if (clipCount >= 3) lastClipMs = millis();
+    micMeanSq += (sumSq / samplesFFT - micMeanSq) * 0.05f;                   // ~0.5 s at 43 batches/s
+    micLevelDb = 10.0f * log10f(fmaxf(micMeanSq, 1.0f) / (32768.0f * 32768.0f));
     // release highest sample to volume reactive effects early - not strictly necessary here - could also be done at the end of the function
     // early release allows the filters (getSample() and agcAvg()) to work with fresh values - we will have matching gain and noise gate values when we want to process the FFT results.
     micDataReal = maxSample;
@@ -1458,7 +1464,7 @@ class AudioReactive : public Usermod {
         // usermod exchangeable data
         // we will assign all usermod exportable data here as pointers to original variables or arrays and allocate memory for pointers
         um_data = new um_data_t;
-        um_data->u_size = 15;
+        um_data->u_size = 16;
         um_data->u_type = new um_types_t[um_data->u_size];
         um_data->u_data = new void*[um_data->u_size];
         um_data->u_data[0] = &volumeSmth;      //*used (New)
@@ -1477,7 +1483,7 @@ class AudioReactive : public Usermod {
         um_data->u_type[6] = UMT_BYTE;
         um_data->u_data[7] = &binNum;          // assigned in effect function from UI element!!! (Puddlepeak, Ripplepeak, Waterfall)
         um_data->u_type[7] = UMT_BYTE;
-        // ---- beat tracker (this fork) - consumers must check u_size >= 15 ----
+        // ---- beat tracker (this fork) - consumers must check u_size >= 15 (input level: >= 16) ----
 #ifdef ARDUINO_ARCH_ESP32
         um_data->u_data[8]  = &beatTracker.beatCount;     // uint32: increments on every beat (tempo-locked when confident)
         um_data->u_type[8]  = UMT_UINT32;
@@ -1493,6 +1499,8 @@ class AudioReactive : public Usermod {
         um_data->u_type[13] = UMT_FLOAT;
         um_data->u_data[14] = beatTracker.bands;          // float[3]: bass / mid / high, self-normalized 0..1
         um_data->u_type[14] = UMT_FLOAT_ARR;
+        um_data->u_data[15] = &micLevelDb;                 // float: input RMS in dBFS before auto gain (-90..0), ~0.5 s average
+        um_data->u_type[15] = UMT_FLOAT;
 #else
         um_data->u_size = 8;                              // no local beat tracker on 8266
 #endif
