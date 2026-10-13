@@ -7,7 +7,7 @@
  */
 
 // version code in format yymmddb (b = daily build)
-#define VERSION 261010
+#define VERSION 261013
 
 //uncomment this if you have a "my_config.h" file you'd like to use
 //#define WLED_USE_MY_CONFIG
@@ -51,6 +51,8 @@
 #endif
 
 #define WLED_DISABLE_ESPNOW      // Removes dependence on esp now
+#define WLED_DISABLE_SYNC        // (fork) no network sync / realtime: WLED UDP broadcast + instance list, raw UDP,
+                                 // E1.31 / Art-Net, DDP. Web UI, JSON API, websockets, mDNS and NTP stay.
 
 #define WLED_ENABLE_FS_EDITOR      // enable /edit page for editing FS content. Will also be disabled with OTA lock
 
@@ -470,10 +472,14 @@ WLED_GLOBAL bool arlsForceMaxBri _INIT(false);                    // enable to f
   WLED_GLOBAL uint16_t DMXStartLED _INIT(0);      // LED from which DMX fixtures start
 #endif
 #ifdef WLED_ENABLE_DMX_INPUT
-  WLED_GLOBAL int dmxInputTransmitPin _INIT(0);
-  WLED_GLOBAL int dmxInputReceivePin _INIT(0);
-  WLED_GLOBAL int dmxInputEnablePin _INIT(0);
+  WLED_GLOBAL int dmxInputTransmitPin _INIT(-1);   // -1 = DMX input off until pins are set (Sync settings)
+  WLED_GLOBAL int dmxInputReceivePin _INIT(-1);
+  WLED_GLOBAL int dmxInputEnablePin _INIT(-1);
+  #if defined(ARDUINO_ARCH_ESP32) && (SOC_UART_NUM > 2)
   WLED_GLOBAL int dmxInputPort _INIT(2);
+  #else
+  WLED_GLOBAL int dmxInputPort _INIT(1);  // some MCUs only have two UART units
+  #endif
   WLED_GLOBAL DMXInput dmxInput;
 #endif
 

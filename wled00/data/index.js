@@ -344,23 +344,13 @@ function openTab(tabI, force = false)
 	_C.classList.toggle('smooth', false);
 	_C.style.setProperty('--i', iSlide);
 	updateTablinks(tabI);
-	switch (tabI) {
-		case 0: window.location.hash = "Colors"; break;
-		case 1: window.location.hash = "Effects"; break;
-		case 2: window.location.hash = "MovingHead"; break;
-		case 3: window.location.hash = "Segments"; break;
-		case 4: window.location.hash = "Presets"; break;
-	}
+	let t = gEBCN("tabcontent")[tabI];	// tab order follows the page (the Mover tab exists only with the MovingHead usermod)
+	if (t) window.location.hash = t.id;
 }
 
 function handleLocationHash() {
-	switch (window.location.hash) {
-		case "#Colors": openTab(0); break;
-		case "#Effects": openTab(1); break;
-		case "#MovingHead": openTab(2); break;
-		case "#Segments": openTab(3); break;
-		case "#Presets": openTab(4); break;
-	}
+	let i = [...gEBCN("tabcontent")].findIndex(t => '#' + t.id == window.location.hash);
+	if (i >= 0) openTab(i);
 }
 
 // ---- Moving Head ("Mover" tab) ----
@@ -473,6 +463,7 @@ function MHbuild() {
 function MHapply(s) {
 	try {
 		if (!s) return;
+		if (!s.MovingHead) { MHremove(); return; }	// build without the MovingHead usermod
 		MHbuild();
 		for (let e of d.querySelectorAll('#mhPanel [data-k]')) {
 			let [o, kk] = MHsplit(e.dataset.k), m = s[o]; if (!m) continue;
@@ -482,9 +473,25 @@ function MHapply(s) {
 		}
 	} catch (e) {}
 }
+// no MovingHead usermod in this build: drop the Mover tab and its slide, renumber the others
+function MHremove() {
+	let t = gId('MovingHead'); if (!t) return;
+	let tabs = [...gEBCN('tabcontent')], cur = tabs[iSlide] ? tabs[iSlide].id : '';
+	let b = gEBCN('tablinks')[tabs.indexOf(t)];
+	t.remove(); if (b) b.remove();
+	N = gEBCN('tabcontent').length;
+	[...gEBCN('tablinks')].forEach((e, i) => { e.onclick = () => openTab(i); e.style.width = (100 / N) + '%'; });
+	if (simplifiedUI) return;
+	_C.style.setProperty('--n', N);
+	if (pcMode) { openTab(0, true); return; }
+	_C.style.width = N * 100 + '%';
+	let ni = [...gEBCN('tabcontent')].findIndex(e => e.id == cur);
+	openTab(ni < 0 ? 0 : ni, true);
+}
 // live status line (BPM, tempo source, current pattern) - polled only while the Mover tab is visible
 function MHstatus() {
-	if (d.hidden || !(pcMode || iSlide == 2)) return;
+	let mt = gId('MovingHead');
+	if (d.hidden || !mt || !(pcMode || gEBCN('tabcontent')[iSlide] === mt)) return;
 	fetch(getURL('/json/info')).then(r => r.json()).then(i => {
 		let m = i.mh, e = gId('mhStat'); if (!m || !e) return;
 		let t = m.bpm ? `&#9835; <b>${m.bpm}</b> BPM (${m.src})` : (m.sil ? '&#9835; silence' : '&#9835; no tempo lock');
@@ -819,6 +826,7 @@ function parseInfo(i) {
 		gId("filter2D").classList.remove('hide');
 	}
 	gId("updBt").style.display = (i.opt & 1) ? '':'none';
+	if (i.opt & 0x20) gId("buttonSync").style.display = 'none';	// build without network sync
 //	if (i.noaudio) {
 //		gId("filterVol").classList.add("hide");
 //		gId("filterFreq").classList.add("hide");
@@ -3253,7 +3261,8 @@ function unfocusSliders()
 }
 
 // sliding UI
-const _C = d.querySelector('.container'), N = 5;
+const _C = d.querySelector('.container');
+let N = 5;	// tabs; 4 when the Mover tab is removed (MHremove)
 
 let iSlide = 0, x0 = null, scrollS = 0, locked = false;
 
@@ -3328,7 +3337,7 @@ function togglePcMode(fromB = false)
 	gId('buttonPcm').className = (pcMode) ? "active":"";
 	gId('bot').style.height = (pcMode && !cfg.comp.pcmbot) ? "0":"auto";
 	sCol('--bh', gId('bot').clientHeight + "px");
-	_C.style.width = (pcMode || simplifiedUI)?'100%':'500%';
+	_C.style.width = (pcMode || simplifiedUI)?'100%':(N*100+'%');
 }
 
 function mergeDeep(target, ...sources)
