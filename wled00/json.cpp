@@ -894,6 +894,9 @@ void serializeInfo(JsonObject root)
   #endif
 
   //os += 0x20; // indicated now removed Blynk support, may be reused to indicate another build-time option
+  #ifdef WLED_DISABLE_SYNC
+  os += 0x20;   // (fork) no network sync in this build -> UI hides the Sync button
+  #endif
 
   #ifdef USERMOD_CRONIXIE
   os += 0x10;

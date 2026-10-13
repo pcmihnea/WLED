@@ -670,6 +670,7 @@ void WLED::initAP(bool resetAP)
   {
     DEBUG_PRINTLN(F("Init AP interfaces"));
     server.begin();
+    #ifndef WLED_DISABLE_SYNC
     if (udpPort > 0 && udpPort != ntpLocalPort) {
       udpConnected = notifierUdp.begin(udpPort);
     }
@@ -681,6 +682,7 @@ void WLED::initAP(bool resetAP)
     }
     e131.begin(false, e131Port, e131Universe, E131_MAX_UNIVERSE_COUNT);
     ddp.begin(false, DDP_DEFAULT_PORT);
+    #endif
 
     dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
     dnsServer.start(53, "*", WiFi.softAPIP());
@@ -868,6 +870,7 @@ void WLED::initInterfaces()
   }
   server.begin();
 
+  #ifndef WLED_DISABLE_SYNC   // no sync / realtime listeners: UDP stays closed (udpConnected = false -> notify() is a no-op)
   if (udpPort > 0 && udpPort != ntpLocalPort) {
     udpConnected = notifierUdp.begin(udpPort);
     if (udpConnected && udpRgbPort != udpPort)
@@ -875,11 +878,14 @@ void WLED::initInterfaces()
     if (udpConnected && udpPort2 != udpPort && udpPort2 != udpRgbPort)
       udp2Connected = notifier2Udp.begin(udpPort2);
   }
+  #endif
   if (ntpEnabled)
     ntpConnected = ntpUdp.begin(ntpLocalPort);
 
+  #ifndef WLED_DISABLE_SYNC
   e131.begin(e131Multicast, e131Port, e131Universe, E131_MAX_UNIVERSE_COUNT);
   ddp.begin(false, DDP_DEFAULT_PORT);
+  #endif
   reconnectHue();
   interfacesInited = true;
   wasConnected = true;
