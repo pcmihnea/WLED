@@ -507,6 +507,9 @@ void getSettingsJS(byte subPage, Print& settingsScript)
 #ifdef WLED_ENABLE_DMX
     settingsScript.print(SET_F("hideNoDMXOutput();"));  // hide "not compiled in" message
 #endif
+#ifdef WLED_DISABLE_SYNC
+    settingsScript.print(F("toggle('UDPsync');"));     // hide broadcast / sync groups / realtime settings
+#endif
 #ifndef WLED_ENABLE_DMX_INPUT
     settingsScript.print(SET_F("hideDMXInput();"));  // hide "dmx input" settings
 #else

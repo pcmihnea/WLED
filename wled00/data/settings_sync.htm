@@ -78,6 +78,10 @@
 <button type="button" onclick="B()">Back</button><button type="submit">Save</button><hr>
 </div>
 <h2>Sync setup</h2>
+<div id="NoUDPsync" class="hide">
+<div class="sec"><i class="warn">This firmware build does not include network sync or realtime input<br>(WLED broadcast, sync groups, E1.31 / Art-Net, DDP, UDP realtime).</i></div>
+</div>
+<div id="UDPsync">
 <div class="sec">
 <h3>WLED Broadcast</h3>
 UDP Port: <input name="UP" type="number" min="1" max="65535" class="d5" required><br>
@@ -207,6 +211,7 @@ Realtime LED offset: <input name="WO" type="number" min="-255" max="255" require
   <br><i class="warn">This firmware build does not include DMX output support. <br></i>
 </div> 
 </div>
+</div><!-- UDPsync -->
 <div class="sec">
 <h3>Alexa Voice Assistant</h3>
 <div id="NoAlexa" class="hide">

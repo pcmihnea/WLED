@@ -239,7 +239,9 @@ class Atoms3rDisplayUsermod : public Usermod {
       const int RW = d->width()-2;
       {
         um_data_t* um = nullptr;   // getUMData() returns false when AR is off OR codec-faulted -> "MIC --"
-        if (UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) && um) {
+        if (!(pageMask & 0x02)) {  // no AudioReactive in this build: LED count instead of the mic level
+          field(d, 2, 1, BASECOL, "LEDS: %u", (unsigned)strip.getLengthTotal());
+        } else if (UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) && um) {
           int pct = (int)(*(float*)um->u_data[0] / 255.0f * 100.0f);
           pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
           field(d, 2, 1, pct > 2 ? TFT_GREEN : BASECOL, "MIC: %d%%", pct);
@@ -526,7 +528,9 @@ class Atoms3rDisplayUsermod : public Usermod {
     void appendConfigData(Print& uiScript) override {
       uiScript.print(F("ux='AtomS3R-Display';"));
       uiScript.print(F("dd=addDropdown(ux,'rotation');addOption(dd,'0',0);addOption(dd,'90',1);addOption(dd,'180',2);addOption(dd,'270',3);"));
-      uiScript.print(F("dd=addDropdown(ux,'page');addOption(dd,'Status',0);addOption(dd,'Audio',1);addOption(dd,'Mover',2);"));
+      uiScript.print(F("dd=addDropdown(ux,'page');addOption(dd,'Status',0);"));     // only pages this build has
+      if (pageMask & 0x02) uiScript.print(F("addOption(dd,'Audio',1);"));
+      if (pageMask & 0x04) uiScript.print(F("addOption(dd,'Mover',2);"));
       uiScript.print(F("addInfo(ux+':backlight',1,'%');"));
       uiScript.print(F("addInfo(ux+':sleepSeconds',1,'s, 0 = always on');"));
       uiScript.print(F("addInfo(ux+':page',1,'page at boot - long-press the button to cycle');"));
