@@ -58,6 +58,7 @@ class Atoms3rDisplayUsermod : public Usermod {
     bool     showPreview  = true;
     uint8_t  startPage    = 0;
     uint8_t  page         = 0;
+    uint8_t  pageMask     = 0x07;   // pages whose usermod is in this build (bit0 Status, bit1 Audio, bit2 Mover)
 
     bool     displayOff = false, btnDown = false, longFired = false;
     unsigned long cfgDirtyAt = 0;      // backlight / page changed from the Mover tab -> save cfg.json 5 s later
@@ -77,6 +78,13 @@ class Atoms3rDisplayUsermod : public Usermod {
     inline uint8_t blByte() const { return (uint16_t)backlight * 255 / 100; }
     inline lgfx::LovyanGFX* g() { return useCanvas ? (lgfx::LovyanGFX*)&canvas : (lgfx::LovyanGFX*)&display; }
     void wake() { if (displayOff && initDone && enabled) { display.setBrightness(blByte()); displayOff = false; } lastInteract = millis(); }
+
+    // only pages whose data source is compiled in (e.g. the PWM build has no AudioReactive / MovingHead)
+    uint8_t validPage(uint8_t p) const { p %= NUM_PAGES; return ((pageMask >> p) & 1) ? p : 0; }
+    uint8_t nextPage(uint8_t p) const {
+      for (uint8_t i = 1; i <= NUM_PAGES; i++) { uint8_t q = (p + i) % NUM_PAGES; if ((pageMask >> q) & 1) return q; }
+      return 0;
+    }
 
     static uint16_t fpsCol(int f) { return f<20 ? TFT_RED : f<40 ? TFT_ORANGE : TFT_GREEN; }
     static uint16_t sigCol(int q) { return q<10 ? TFT_RED : q<25 ? TFT_ORANGE : TFT_GREEN; }
@@ -113,7 +121,9 @@ class Atoms3rDisplayUsermod : public Usermod {
       uint8_t pins[] = { ATOMS3R_LCD_MOSI, ATOMS3R_LCD_SCK, ATOMS3R_LCD_CS, ATOMS3R_LCD_DC, ATOMS3R_LCD_RST };
       for (uint8_t p : pins) PinManager::allocatePin(p, true, PinOwner::UM_Unspecified);
       if (PinManager::allocatePin(ATOMS3R_BTN_PIN, false, PinOwner::UM_Unspecified)) pinMode(ATOMS3R_BTN_PIN, INPUT_PULLUP);
-      page = startPage % NUM_PAGES;
+      pageMask = 0x01 | (UsermodManager::lookup(USERMOD_ID_AUDIOREACTIVE) ? 0x02 : 0)
+                      | (UsermodManager::lookup(USERMOD_ID_MOVINGHEAD) ? 0x04 : 0);
+      page = validPage(startPage);
       if (!enabled) return;
       initDone = initDisplay();
     }
@@ -168,7 +178,7 @@ class Atoms3rDisplayUsermod : public Usermod {
         displayOff = false; lastInteract = millis(); lastFrame = 0;
       }
       int8_t p = reqPage;
-      if (p >= 0) { reqPage = -1; page = p % NUM_PAGES; trailN = 0; lastFrame = 0; }
+      if (p >= 0) { reqPage = -1; page = validPage(p); trailN = 0; lastFrame = 0; }
       if (reqBl)   { reqBl = false; if (!displayOff) display.setBrightness(blByte()); }
       if (reqWake) { reqWake = false; wake(); }
     }
@@ -184,7 +194,7 @@ class Atoms3rDisplayUsermod : public Usermod {
         if (!longFired && now - btnT0 >= LONGPRESS_MS) {   // long press
           longFired = true;
           bool wasOff = displayOff; wake();
-          if (!wasOff) { page = (page + 1) % NUM_PAGES; trailN = 0; lastFrame = 0; }
+          if (!wasOff) { page = nextPage(page); trailN = 0; lastFrame = 0; }
         }
       } else if (!down && btnDown) {                       // released
         btnDown = false;
@@ -208,8 +218,13 @@ class Atoms3rDisplayUsermod : public Usermod {
       d->setTextColor(col); d->setTextDatum(TR_DATUM); d->drawString(buf, x, y);
     }
     void pageDots(lgfx::LovyanGFX* d) {
-      for (int i = 0; i < NUM_PAGES; i++)
-        d->fillCircle(d->width() - 4 - (NUM_PAGES - 1 - i) * 6, 4, 2, i == page ? TFT_WHITE : DIM565);
+      int n = 0; for (int i = 0; i < NUM_PAGES; i++) n += (pageMask >> i) & 1;
+      if (n < 2) return;                                   // a single page needs no dots
+      for (int i = 0, k = 0; i < NUM_PAGES; i++) {
+        if (!((pageMask >> i) & 1)) continue;
+        d->fillCircle(d->width() - 4 - (n - 1 - k) * 6, 4, 2, i == page ? TFT_WHITE : DIM565);
+        k++;
+      }
     }
     static uint16_t c565(lgfx::LovyanGFX* d, uint32_t c) {        // WLED RGBW -> 565 (W folded in)
       uint16_t w = (c >> 24) & 0xFF;

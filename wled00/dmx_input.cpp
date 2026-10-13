@@ -142,7 +142,9 @@ void DMXInput::init(int8_t rxPin, int8_t txPin, int8_t enPin, uint8_t inputPortN
     return;
   }
 
-  if (rxPin >= 0 && enPin >= 0 && txPin >= 0) {
+  // rx == tx is never real wiring: old configs saved 0/0/0 as "unset" - keep DMX input off then, otherwise it
+  // would claim GPIO0 and the UART that DMX output (WLED_ENABLE_DMX / movinghead) is using
+  if (rxPin >= 0 && enPin >= 0 && txPin >= 0 && rxPin != txPin) {
 
     const managed_pin_type pins[] = {
         {(int8_t)txPin, false}, // these are not used as gpio pins, thus isOutput is always false.
