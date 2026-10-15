@@ -1939,6 +1939,16 @@ Segment& WS2812FX::getSegment(unsigned id) {
 void WS2812FX::resetSegments() {
   if (isServicing()) return;
   _segments.clear();          // destructs all Segment as part of clearing
+#ifdef WLED_DEFAULT_SEGMENTS  // (fork) default segments from a list of boundaries: "0,4,10" = segments 0-3 and 4-9 (1D only)
+  if (!isMatrix) {
+    static const uint16_t bounds[] = { WLED_DEFAULT_SEGMENTS };
+    for (size_t i = 0; i + 1 < sizeof(bounds)/sizeof(bounds[0]) && _segments.size() < getMaxSegments(); i++) {
+      unsigned s = min((unsigned)bounds[i], (unsigned)_length), e = min((unsigned)bounds[i+1], (unsigned)_length);
+      if (e > s) _segments.emplace_back(s, e, 0, 1);
+    }
+  }
+  if (_segments.empty())
+#endif
   _segments.emplace_back(0, isMatrix ? Segment::maxWidth : _length, 0, isMatrix ? Segment::maxHeight : 1);
   if (getActiveSegmentsNum() == 0) {
     _segments.clear();        // free failed segment
@@ -2110,6 +2120,19 @@ bool WS2812FX::deserializeMap(unsigned n) {
     return false;
   }
 
+#ifdef WLED_DEFAULT_LEDMAP
+  // (fork) build-time default ledmap: used when no /ledmap.json exists (an uploaded ledmap.json always wins)
+  if (!isFile && n == 0) {
+    static const uint16_t defMap[] = { WLED_DEFAULT_LEDMAP };
+    d_free(customMappingTable);
+    customMappingTable = static_cast<uint16_t*>(d_malloc(sizeof(uint16_t)*getLengthTotal()));
+    if (customMappingTable) {
+      for (unsigned i = 0; i < sizeof(defMap)/sizeof(defMap[0]) && i < getLengthTotal(); i++)
+        customMappingTable[customMappingSize++] = defMap[i];
+    }
+    return (customMappingSize > 0);
+  }
+#endif
   if (!isFile || !requestJSONBufferLock(JSON_LOCK_LEDMAP)) return false;
 
   StaticJsonDocument<64> filter;
