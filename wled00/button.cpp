@@ -121,6 +121,20 @@ bool isButtonPressed(uint8_t b)
   return false;
 }
 
+// (fork) PIR / radar handling: off delay after the last movement, re-arm lockout after switching off
+static unsigned long pirOffAt[WLED_MAX_BUTTONS] = {0};   // pending "no presence" time per button, 0 = none
+static unsigned long pirArmAt[WLED_MAX_BUTTONS] = {0};   // end of the re-arm lockout, 0 = armed
+static bool          pirPending[WLED_MAX_BUTTONS] = {0}; // movement seen during the lockout
+static void pirPresence(uint8_t b) {   // short-press preset, else lights on
+  if (buttons[b].macroButton) applyPreset(buttons[b].macroButton, CALL_MODE_BUTTON_PRESET);
+  else if (!bri) { toggleOnOff(); stateUpdated(CALL_MODE_BUTTON); }
+}
+static void pirAbsence(uint8_t b) {    // long-press preset, else lights off; then ignore movement for pirRearm ms
+  if (buttons[b].macroLongPress) applyPreset(buttons[b].macroLongPress, CALL_MODE_BUTTON_PRESET);
+  else if (bri) { toggleOnOff(); stateUpdated(CALL_MODE_BUTTON); }
+  if (pirRearm && b < WLED_MAX_BUTTONS) { pirArmAt[b] = (millis() + pirRearm) | 1; pirPending[b] = false; }
+}
+
 void handleSwitch(uint8_t b)
 {
   // isButtonPressed() handles inverted/noninverted logic
@@ -130,15 +144,35 @@ void handleSwitch(uint8_t b)
     buttons[b].pressedBefore = !buttons[b].pressedBefore; // toggle pressed state
   }
 
+  if (b < WLED_MAX_BUTTONS && buttons[b].type == BTN_TYPE_PIR_SENSOR) {
+    // (fork) PIR off delay elapsed without new movement
+    if (pirOffAt[b] && (long)(millis() - pirOffAt[b]) >= 0) {
+      pirOffAt[b] = 0;
+      if (!buttons[b].pressedBefore) pirAbsence(b);
+    }
+    // (fork) re-arm lockout over: movement that is still there now switches on
+    if (pirArmAt[b] && (long)(millis() - pirArmAt[b]) >= 0) {
+      pirArmAt[b] = 0;
+      if (pirPending[b] && buttons[b].pressedBefore) pirPresence(b);
+      pirPending[b] = false;
+    }
+  }
+
   if (buttons[b].longPressed == buttons[b].pressedBefore) return;
 
   if (millis() - buttons[b].pressedTime > WLED_DEBOUNCE_THRESHOLD) { //fire edge event only after 50ms without change (debounce)
     DEBUG_PRINTF_P(PSTR("Switch: Activating  %u\n"), b);
-    if (buttons[b].type == BTN_TYPE_PIR_SENSOR) {  // (fork) PIR / radar: presence (high) = on, no presence (low) = off
-      const bool presence = buttons[b].pressedBefore;
-      const uint8_t preset = presence ? buttons[b].macroButton : buttons[b].macroLongPress;  // short-press slot = presence, long-press slot = no presence
-      if (preset) applyPreset(preset, CALL_MODE_BUTTON_PRESET);
-      else if (presence != (bri > 0)) { toggleOnOff(); stateUpdated(CALL_MODE_BUTTON); }
+    if (buttons[b].type == BTN_TYPE_PIR_SENSOR) {  // (fork) PIR / radar: presence (high) = on, no presence (low) = off after pirOffDelay
+      if (buttons[b].pressedBefore) {                // presence: cancels a pending off; on now, or when the re-arm lockout ends
+        if (b < WLED_MAX_BUTTONS) pirOffAt[b] = 0;
+        if (b < WLED_MAX_BUTTONS && pirArmAt[b]) pirPending[b] = true;
+        else pirPresence(b);
+      } else {
+        if (b < WLED_MAX_BUTTONS) pirPending[b] = false;
+        if (b < WLED_MAX_BUTTONS && pirArmAt[b]) {}   // still in the lockout: the sensor already switched off, nothing to do
+        else if (pirOffDelay && b < WLED_MAX_BUTTONS) pirOffAt[b] = (millis() + pirOffDelay * 1000UL) | 1;   // act after the delay (see above)
+        else pirAbsence(b);
+      }
     } else
     if (!buttons[b].pressedBefore) { // on -> off
       DEBUG_PRINTF_P(PSTR("Switch: On -> Off (%u)\n"), b);
