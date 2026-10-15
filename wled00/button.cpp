@@ -134,6 +134,12 @@ void handleSwitch(uint8_t b)
 
   if (millis() - buttons[b].pressedTime > WLED_DEBOUNCE_THRESHOLD) { //fire edge event only after 50ms without change (debounce)
     DEBUG_PRINTF_P(PSTR("Switch: Activating  %u\n"), b);
+    if (buttons[b].type == BTN_TYPE_PIR_SENSOR) {  // (fork) PIR / radar: presence (high) = on, no presence (low) = off
+      const bool presence = buttons[b].pressedBefore;
+      const uint8_t preset = presence ? buttons[b].macroButton : buttons[b].macroLongPress;  // short-press slot = presence, long-press slot = no presence
+      if (preset) applyPreset(preset, CALL_MODE_BUTTON_PRESET);
+      else if (presence != (bri > 0)) { toggleOnOff(); stateUpdated(CALL_MODE_BUTTON); }
+    } else
     if (!buttons[b].pressedBefore) { // on -> off
       DEBUG_PRINTF_P(PSTR("Switch: On -> Off (%u)\n"), b);
       if (buttons[b].macroButton) applyPreset(buttons[b].macroButton, CALL_MODE_BUTTON_PRESET);
