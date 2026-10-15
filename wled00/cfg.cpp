@@ -353,6 +353,8 @@ bool deserializeConfig(JsonObject doc, bool fromFS) {
   // read multiple button configuration
   JsonObject btn_obj = hw["btn"];
   CJSON(touchThreshold, btn_obj[F("tt")]);
+  CJSON(pirOffDelay, btn_obj[F("pirdly")]);   // (fork) PIR off delay, seconds
+  CJSON(pirRearm, btn_obj[F("pirarm")]);      // (fork) PIR re-arm lockout, ms
   bool pull = btn_obj[F("pull")] | (!disablePullUp); // if true, pullup is enabled
   disablePullUp = !pull;
   JsonArray hw_btn_ins = btn_obj["ins"];
@@ -1036,6 +1038,8 @@ void serializeConfig(JsonObject root) {
   }
 
   hw_btn[F("tt")] = touchThreshold;
+  hw_btn[F("pirdly")] = pirOffDelay;          // (fork)
+  hw_btn[F("pirarm")] = pirRearm;             // (fork)
   hw_btn["mqtt"] = buttonPublishMqtt;
 
   JsonObject hw_ir = hw.createNestedObject("ir");

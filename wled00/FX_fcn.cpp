@@ -1745,14 +1745,29 @@ void WS2812FX::show() {
   // use color gamma correction if enabled, not in realtime mode with gamma disabled or currently overriding RT mode
   bool useGammaCorrection = gammaCorrectCol && !(realtimeMode && arlsDisableGammaCorrection && !realtimeOverride);
 
+#ifdef WLED_PIXEL_GROUPS
+  // (fork) pixel groups: logical pixel g drives the whole g-th group of output positions (sizes in WLED_PIXEL_GROUPS,
+  // counted in ledmap order). Positions after the last group show their own pixel (normally black / unused).
+  static const uint8_t grpSize[] = { WLED_PIXEL_GROUPS };
+  constexpr unsigned numGrp = sizeof(grpSize) / sizeof(grpSize[0]);
+  unsigned grp = 0, grpLeft = grpSize[0];
+#endif
+  int lastCCT = -1;
   for (size_t i = 0; i < totalLen; i++) {
+    size_t src = i;                                  // frame buffer position that feeds output position i
+#ifdef WLED_PIXEL_GROUPS
+    if (grp < numGrp) {
+      src = grp;
+      if (--grpLeft == 0 && ++grp < numGrp) grpLeft = grpSize[grp];
+    }
+#endif
     // when correctWB is true setSegmentCCT() will convert CCT into K with which we can then
     // correct/adjust RGB value according to desired CCT value, it will still affect actual WW/CW ratio
     if (_pixelCCT) { // cctFromRgb already exluded at allocation
-      if (i == 0 || _pixelCCT[i-1] != _pixelCCT[i]) BusManager::setSegmentCCT(_pixelCCT[i], correctWB);
+      if (_pixelCCT[src] != lastCCT) { lastCCT = _pixelCCT[src]; BusManager::setSegmentCCT(_pixelCCT[src], correctWB); }
     }
 
-    uint32_t c = _pixels[i]; // need a copy, do not modify _pixels directly (no byte access allowed on ESP32)
+    uint32_t c = _pixels[src]; // need a copy, do not modify _pixels directly (no byte access allowed on ESP32)
     if (c > 0 && useGammaCorrection)
       c = gamma32(c); // apply gamma correction if enabled note: applying gamma after brightness has too much color loss
     BusManager::setPixelColor(getMappedPixelIndex(i), c);

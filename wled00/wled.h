@@ -669,6 +669,14 @@ WLED_GLOBAL std::vector<Button> buttons; // vector of button structs
 WLED_GLOBAL bool buttonPublishMqtt                            _INIT(false);
 WLED_GLOBAL bool disablePullUp                                _INIT(false);
 WLED_GLOBAL byte touchThreshold                               _INIT(TOUCH_THRESHOLD);
+#ifndef WLED_PIR_OFF_DELAY
+  #define WLED_PIR_OFF_DELAY 0   // (fork) default seconds a PIR / radar input keeps the lights on after the last movement
+#endif
+WLED_GLOBAL uint16_t pirOffDelay                              _INIT(WLED_PIR_OFF_DELAY);  // (fork) 0 = act immediately when the sensor drops
+#ifndef WLED_PIR_REARM
+  #define WLED_PIR_REARM 0       // (fork) default ms a PIR / radar input ignores new movement after it switched the lights off
+#endif
+WLED_GLOBAL uint16_t pirRearm                                 _INIT(WLED_PIR_REARM);      // (fork) 0 = no lockout
 
 // notifications
 WLED_GLOBAL bool sendNotifications    _INIT(false);           // master notification switch

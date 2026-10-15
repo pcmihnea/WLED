@@ -691,7 +691,7 @@ Swap: <select id="xw${s}" name="XW${s}">
 			var b = gId("btns");
 			var s = chrID(i);
 			var c = `<div id="btn${i}">#${i} GPIO: <input type="number" name="BT${s}" onchange="UI()" min="-1" max="${d.max_gpio}" class="xs" value="${p}">`;
-			c += `&nbsp;<select name="BE${s}" onchange="btnPinDd('${s}')">`
+			c += `&nbsp;<select name="BE${s}" onchange="btnPinDd('${s}');pirVis()">`
 			c += `<option value="0" ${t==0?"selected":""}>Disabled</option>`;
 			c += `<option value="2" ${t==2?"selected":""}>Pushbutton</option>`;
 			c += `<option value="3" ${t==3?"selected":""}>Push inverted</option>`;
@@ -705,13 +705,20 @@ Swap: <select id="xw${s}" name="XW${s}">
 			c += `<span style="cursor: pointer;" onclick="off('BT${s}')">&nbsp;&#x2715;</span><br></div>`;
 			b.insertAdjacentHTML("beforeend", c);
 			btnBtn();
+			pirVis();
 			pinDropdowns();
 			UI();
+		}
+		function pirVis() { // (fork) PIR off delay only matters when a button is a PIR sensor
+			let pir = false;
+			d.querySelectorAll('#btns select[name^="BE"]').forEach(e => { if (e.value == 5) pir = true; });
+			gId("pirdly").style.display = pir ? "" : "none";
 		}
 		function remBtn() {
 			var b = gId("btns");
 			if (b.children.length <= 1) return;
 			b.lastElementChild.remove();
+			pirVis();
 			btnBtn();
 			pinDropdowns();
 			UI();
@@ -1093,6 +1100,8 @@ Swap: <select id="xw${s}" name="XW${s}">
 			<button type="button" id="btn_rem" onclick="remBtn()">-</button>
 		</div>
 		Disable internal pull-up/down: <input type="checkbox" name="IP"><br>
+		<div id="pirdly" style="display:none">PIR off delay: <input type="number" class="m" min="0" max="3600" name="PD" value="0"> s<br><i>lights stay on this long after the sensor's last movement (0 = immediately)</i><br>
+		PIR re-arm delay: <input type="number" class="m" min="0" max="60000" step="100" name="PR" value="0"> ms<br><i>after the sensor switched the lights off, movement is ignored this long (0 = off)</i><br></div>
 		Touch threshold: <input type="number" class="s" min="0" max="100" name="TT" required><br><br>
 	</div>
 	<div class="sec">

@@ -311,6 +311,8 @@ void handleSettingsSet(AsyncWebServerRequest *request, byte subPage)
 
     disablePullUp = (bool)request->hasArg(F("IP"));
     touchThreshold = request->arg(F("TT")).toInt();
+    if (request->hasArg(F("PD"))) pirOffDelay = constrain(request->arg(F("PD")).toInt(), 0, 3600);   // (fork) PIR off delay, s
+    if (request->hasArg(F("PR"))) pirRearm = constrain(request->arg(F("PR")).toInt(), 0, 60000);     // (fork) PIR re-arm, ms
     for (int i = 0; i < WLED_MAX_BUTTONS; i++) {
       int offset = i < 10 ? '0' : 'A' - 10;
       char bt[4] = "BT"; bt[2] = offset+i; bt[3] = 0; // button pin (use A,B,C,... if WLED_MAX_BUTTONS>10)
