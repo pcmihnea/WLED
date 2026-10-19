@@ -332,7 +332,13 @@ bool deserializeConfig(JsonObject doc, bool fromFS) {
       unsigned start = 0;
       // analog always has length 1
       if (Bus::isPWM(dataType) || Bus::isOnOff(dataType)) count = 1;
-      busConfigs.emplace_back(dataType, defPin, start, count, DEFAULT_LED_COLOR_ORDER, false, 0, RGBW_MODE_MANUAL_ONLY, 0, LED_MILLIAMPS_DEFAULT, ABL_MILLIAMPS_DEFAULT, 0); // driver=0 (RMT default)
+      #ifdef DEFAULT_LED_COLOR_ORDERS   // (fork) per-output colour order list; last entry repeats for further outputs
+      constexpr uint8_t defOrders[] = {DEFAULT_LED_COLOR_ORDERS};
+      const uint8_t colorOrder = defOrders[(i < sizeof(defOrders)) ? i : sizeof(defOrders) - 1];
+      #else
+      const uint8_t colorOrder = DEFAULT_LED_COLOR_ORDER;
+      #endif
+      busConfigs.emplace_back(dataType, defPin, start, count, colorOrder, false, 0, RGBW_MODE_MANUAL_ONLY, 0, LED_MILLIAMPS_DEFAULT, ABL_MILLIAMPS_DEFAULT, 0); // driver=0 (RMT default)
       doInitBusses = true;  // finalization done in beginStrip()
     }
   }

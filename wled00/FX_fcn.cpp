@@ -1954,10 +1954,10 @@ Segment& WS2812FX::getSegment(unsigned id) {
 void WS2812FX::resetSegments() {
   if (isServicing()) return;
   _segments.clear();          // destructs all Segment as part of clearing
-#ifdef WLED_DEFAULT_SEGMENTS  // (fork) default segments from a list of boundaries: "0,4,10" = segments 0-3 and 4-9 (1D only)
+#ifdef WLED_DEFAULT_SEGMENTS  // (fork) default segments as start,stop pairs: "0,9,47,59" = segments 0-8 and 47-58 (1D only)
   if (!isMatrix) {
     static const uint16_t bounds[] = { WLED_DEFAULT_SEGMENTS };
-    for (size_t i = 0; i + 1 < sizeof(bounds)/sizeof(bounds[0]) && _segments.size() < getMaxSegments(); i++) {
+    for (size_t i = 0; i + 1 < sizeof(bounds)/sizeof(bounds[0]) && _segments.size() < getMaxSegments(); i += 2) {
       unsigned s = min((unsigned)bounds[i], (unsigned)_length), e = min((unsigned)bounds[i+1], (unsigned)_length);
       if (e > s) _segments.emplace_back(s, e, 0, 1);
     }
