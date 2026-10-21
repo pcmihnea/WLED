@@ -1745,29 +1745,14 @@ void WS2812FX::show() {
   // use color gamma correction if enabled, not in realtime mode with gamma disabled or currently overriding RT mode
   bool useGammaCorrection = gammaCorrectCol && !(realtimeMode && arlsDisableGammaCorrection && !realtimeOverride);
 
-#ifdef WLED_PIXEL_GROUPS
-  // (fork) pixel groups: logical pixel g drives the whole g-th group of output positions (sizes in WLED_PIXEL_GROUPS,
-  // counted in ledmap order). Positions after the last group show their own pixel (normally black / unused).
-  static const uint8_t grpSize[] = { WLED_PIXEL_GROUPS };
-  constexpr unsigned numGrp = sizeof(grpSize) / sizeof(grpSize[0]);
-  unsigned grp = 0, grpLeft = grpSize[0];
-#endif
-  int lastCCT = -1;
   for (size_t i = 0; i < totalLen; i++) {
-    size_t src = i;                                  // frame buffer position that feeds output position i
-#ifdef WLED_PIXEL_GROUPS
-    if (grp < numGrp) {
-      src = grp;
-      if (--grpLeft == 0 && ++grp < numGrp) grpLeft = grpSize[grp];
-    }
-#endif
     // when correctWB is true setSegmentCCT() will convert CCT into K with which we can then
     // correct/adjust RGB value according to desired CCT value, it will still affect actual WW/CW ratio
     if (_pixelCCT) { // cctFromRgb already exluded at allocation
-      if (_pixelCCT[src] != lastCCT) { lastCCT = _pixelCCT[src]; BusManager::setSegmentCCT(_pixelCCT[src], correctWB); }
+      if (i == 0 || _pixelCCT[i-1] != _pixelCCT[i]) BusManager::setSegmentCCT(_pixelCCT[i], correctWB);
     }
 
-    uint32_t c = _pixels[src]; // need a copy, do not modify _pixels directly (no byte access allowed on ESP32)
+    uint32_t c = _pixels[i]; // need a copy, do not modify _pixels directly (no byte access allowed on ESP32)
     if (c > 0 && useGammaCorrection)
       c = gamma32(c); // apply gamma correction if enabled note: applying gamma after brightness has too much color loss
     BusManager::setPixelColor(getMappedPixelIndex(i), c);
@@ -1954,16 +1939,6 @@ Segment& WS2812FX::getSegment(unsigned id) {
 void WS2812FX::resetSegments() {
   if (isServicing()) return;
   _segments.clear();          // destructs all Segment as part of clearing
-#ifdef WLED_DEFAULT_SEGMENTS  // (fork) default segments as start,stop pairs: "0,9,47,59" = segments 0-8 and 47-58 (1D only)
-  if (!isMatrix) {
-    static const uint16_t bounds[] = { WLED_DEFAULT_SEGMENTS };
-    for (size_t i = 0; i + 1 < sizeof(bounds)/sizeof(bounds[0]) && _segments.size() < getMaxSegments(); i += 2) {
-      unsigned s = min((unsigned)bounds[i], (unsigned)_length), e = min((unsigned)bounds[i+1], (unsigned)_length);
-      if (e > s) _segments.emplace_back(s, e, 0, 1);
-    }
-  }
-  if (_segments.empty())
-#endif
   _segments.emplace_back(0, isMatrix ? Segment::maxWidth : _length, 0, isMatrix ? Segment::maxHeight : 1);
   if (getActiveSegmentsNum() == 0) {
     _segments.clear();        // free failed segment
@@ -2135,19 +2110,6 @@ bool WS2812FX::deserializeMap(unsigned n) {
     return false;
   }
 
-#ifdef WLED_DEFAULT_LEDMAP
-  // (fork) build-time default ledmap: used when no /ledmap.json exists (an uploaded ledmap.json always wins)
-  if (!isFile && n == 0) {
-    static const uint16_t defMap[] = { WLED_DEFAULT_LEDMAP };
-    d_free(customMappingTable);
-    customMappingTable = static_cast<uint16_t*>(d_malloc(sizeof(uint16_t)*getLengthTotal()));
-    if (customMappingTable) {
-      for (unsigned i = 0; i < sizeof(defMap)/sizeof(defMap[0]) && i < getLengthTotal(); i++)
-        customMappingTable[customMappingSize++] = defMap[i];
-    }
-    return (customMappingSize > 0);
-  }
-#endif
   if (!isFile || !requestJSONBufferLock(JSON_LOCK_LEDMAP)) return false;
 
   StaticJsonDocument<64> filter;
